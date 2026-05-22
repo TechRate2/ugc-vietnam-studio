@@ -35,7 +35,7 @@ from agent.director_agent import director
 from agent.schemas import DirectorPlan, ContinuityBible, Shot, StoryboardFrame
 from agent import continuity_manager
 from api.schemas import ProductInput, VideoSettings
-from workers import video_worker
+from workers import video_worker, reassemble_worker
 from core import director_history
 
 
@@ -679,6 +679,75 @@ async def cancel_job(job_id: str):
         raise HTTPException(404, "job not found")
     _JOBS_STORE[job_id].update(status="cancelled")
     return {"job_id": job_id, "status": "cancelled"}
+
+
+# ============================================================
+# POST /reassemble — Timeline Editor re-concat clips
+# ============================================================
+class ReassembleRequest(BaseModel):
+    """Re-concat existing clips theo thứ tự mới user chỉnh ở Timeline Editor.
+
+    KHÔNG render lại từ AtlasCloud — chỉ FFmpeg concat + color pass + R2 upload.
+    Cost: ~$0 (chỉ tốn compute server + R2 storage).
+
+    Input:
+      - parent_job_id: ID job render gốc (lấy plan + chain meta từ history)
+      - clip_urls_in_order: clip URLs đã sắp theo Timeline order
+      - aspect_ratio / resolution / audio_plan: optional overrides
+    """
+    parent_job_id: str
+    clip_urls_in_order: list[str] = Field(..., min_length=1, max_length=30)
+    aspect_ratio: str = "9:16"
+    resolution: str = "720p"
+    audio_plan: Optional[dict] = None
+
+
+@router.post("/reassemble")
+async def reassemble_timeline(request: ReassembleRequest):
+    """Spawn reassemble job. Returns job_id polling URL giống /generate."""
+    # Look up parent for color_grading hint
+    parent = director_history.get_job(request.parent_job_id, include_plan=True)
+    color_grading = ""
+    if parent and parent.get("plan"):
+        try:
+            color_grading = parent["plan"]["continuity_bible"]["visual_style"]["color_grading"] or ""
+        except (KeyError, TypeError):
+            pass
+
+    job_id = f"rasm_{uuid.uuid4().hex[:12]}"
+    _JOBS_STORE[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "current_step": "queued",
+        "mode": "reassemble",
+        "parent_job_id": request.parent_job_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    async def _run():
+        try:
+            await reassemble_worker.reassemble(
+                job_id=job_id,
+                parent_job_id=request.parent_job_id,
+                clip_urls_in_order=request.clip_urls_in_order,
+                aspect_ratio=request.aspect_ratio,
+                resolution=request.resolution,
+                color_grading=color_grading,
+                audio_plan=request.audio_plan,
+                jobs_store=_JOBS_STORE,
+            )
+        except Exception as e:
+            logger.exception(f"[/director/reassemble] {job_id} failed")
+            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+
+    asyncio.create_task(_run())
+    return {
+        "job_id": job_id,
+        "polling_url": f"/api/v1/director/jobs/{job_id}",
+        "mode": "reassemble",
+        "parent_job_id": request.parent_job_id,
+        "clip_count": len(request.clip_urls_in_order),
+    }
 
 
 # ============================================================

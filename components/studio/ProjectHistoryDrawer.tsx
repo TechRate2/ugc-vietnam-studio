@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import {
   X, History as HistoryIcon, Play, GitFork, Trash2, Loader2,
-  CheckCircle2, AlertTriangle, Clock,
+  CheckCircle2, AlertTriangle, Clock, Film,
 } from 'lucide-react';
 import {
   useProjectHistory,
@@ -20,6 +20,7 @@ import {
   type HistoryDetail,
 } from '@/lib/studio/use-project-history';
 import type { DirectorPlan } from '@/lib/studio/use-director-plan';
+import { TimelineEditor } from './TimelineEditor';
 
 interface Props {
   open: boolean;
@@ -33,6 +34,7 @@ export function ProjectHistoryDrawer({ open, onClose, onFork }: Props) {
   const hist = useProjectHistory();
   const [previewJob, setPreviewJob] = useState<HistoryItem | null>(null);
   const [forking, setForking] = useState(false);
+  const [timelineJobId, setTimelineJobId] = useState<string | null>(null);
 
   if (!open) return null;
 
@@ -114,6 +116,7 @@ export function ProjectHistoryDrawer({ open, onClose, onFork }: Props) {
               <HistoryPreview
                 item={previewJob}
                 onFork={onFork ? () => handleFork(previewJob) : undefined}
+                onOpenTimeline={() => setTimelineJobId(previewJob.job_id)}
                 forking={forking}
               />
             ) : (
@@ -123,6 +126,13 @@ export function ProjectHistoryDrawer({ open, onClose, onFork }: Props) {
             )}
           </div>
         </div>
+
+        {/* Timeline Editor modal — đè trên ProjectHistoryDrawer */}
+        <TimelineEditor
+          open={!!timelineJobId}
+          historyJobId={timelineJobId}
+          onClose={() => setTimelineJobId(null)}
+        />
 
         {/* Footer */}
         <div className="border-t border-border px-5 py-3 flex items-center justify-end gap-2">
@@ -192,10 +202,11 @@ function HistoryRow({
 // Sub: preview pane
 // ============================================================
 function HistoryPreview({
-  item, onFork, forking,
+  item, onFork, onOpenTimeline, forking,
 }: {
   item: HistoryItem;
   onFork?: () => void;
+  onOpenTimeline?: () => void;
   forking: boolean;
 }) {
   return (
@@ -237,7 +248,7 @@ function HistoryPreview({
         </div>
       )}
 
-      <div className="flex items-center gap-2 pt-2">
+      <div className="flex items-center gap-2 pt-2 flex-wrap">
         {onFork && (
           <button
             onClick={onFork}
@@ -246,6 +257,14 @@ function HistoryPreview({
           >
             {forking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitFork className="w-3.5 h-3.5" />}
             Fork plan này
+          </button>
+        )}
+        {onOpenTimeline && item.status === 'done' && (
+          <button
+            onClick={onOpenTimeline}
+            className="text-xs px-4 py-2 rounded-md border border-brand-500/50 bg-brand-500/10 hover:bg-brand-500/20 text-brand-200 font-medium inline-flex items-center gap-1.5"
+          >
+            <Film className="w-3.5 h-3.5" /> Open Timeline
           </button>
         )}
         {item.output_url && (
