@@ -132,6 +132,19 @@ class PlanAndRenderRequest(BaseModel):
     use_llm_scene_gen: bool = True
 
 
+class ReviseRequest(BaseModel):
+    """Mutate an existing DirectorPlan with a free-form user instruction.
+
+    Use case: user is reviewing a plan in `DirectorPlanModal`, types
+    "đổi shot 3 sang ban đêm" — server runs Layer 1.5 LLM call against
+    `system_prompts/revise.md` which produces a minimally-edited plan that
+    the FE swaps in (and the editor preserves dirty tracking).
+    """
+    plan: DirectorPlan
+    instruction: str = Field(..., min_length=1, max_length=2000)
+    settings: VideoSettings
+
+
 class RefineRequest(BaseModel):
     """Re-render ONE shot from an existing plan.
 
@@ -508,6 +521,74 @@ async def plan_and_render(request: PlanAndRenderRequest):
         "plan_id": None,
         "mode": "plan_and_render",
     }
+
+
+# ============================================================
+# POST /revise — Layer 1.5 LLM revise current plan via instruction
+# ============================================================
+@router.post("/revise", response_model=DirectorPlan)
+async def revise_plan(request: ReviseRequest):
+    """Mutate the provided plan based on `instruction` and return revised plan.
+
+    Implementation: single LLM call against `system_prompts/revise.md`.
+    Server then re-validates continuity + sanitizes — frontend can swap the
+    revised plan into the editor directly.
+    """
+    from system_prompts import load as load_system_prompt
+    from vendors.llm_router import llm
+    from agent.model_capabilities import summary_for_director_prompt
+    from agent.director_agent import _safe_parse_json  # reuse fence-stripping parser
+    from pydantic import ValidationError as _PVE
+    import json as _json
+
+    tech_config = {
+        "duration_s": request.settings.duration_s,
+        "aspect_ratio": request.settings.aspect_ratio,
+        "audio_mode": request.settings.audio_mode,
+        "model": request.settings.model,
+        "resolution": request.settings.resolution,
+        "num_shots": request.settings.num_shots,
+        "model_capability_notes": summary_for_director_prompt(request.settings.model),
+    }
+    payload = {
+        "current_plan": request.plan.model_dump(),
+        "user_instruction": request.instruction,
+        "tech_config": tech_config,
+    }
+    try:
+        raw = await asyncio.to_thread(
+            llm.complete,
+            system_prompt=load_system_prompt("revise"),
+            user_message=_json.dumps(payload, ensure_ascii=False, default=str),
+            task="generator",
+            max_tokens=8000,
+            temperature=0.4,
+        )
+    except Exception as e:
+        logger.exception("[/director/revise] LLM call failed")
+        raise HTTPException(500, f"Revise LLM call failed: {str(e)[:240]}") from e
+
+    try:
+        raw_dict = _safe_parse_json(raw)
+    except Exception as e:
+        logger.error(f"[/director/revise] JSON parse fail. Head: {raw[:300]}")
+        raise HTTPException(500, f"Revise output is not valid JSON: {e}") from e
+
+    # Pydantic validate — re-use DirectorPlan schema (raises 422 on shape drift)
+    try:
+        revised = DirectorPlan(**raw_dict)
+    except _PVE as e:
+        logger.error(f"[/director/revise] schema invalid: {e}")
+        raise HTTPException(500, f"Revised plan schema invalid: {e}") from e
+
+    # Re-validate continuity + sanitize before returning
+    warnings = continuity_manager.validate_plan(
+        revised, target_duration_s=request.settings.duration_s, tolerance_s=2,
+    )
+    if warnings:
+        logger.warning(f"[/director/revise] revised plan warnings: {warnings[:5]}")
+    revised = continuity_manager.sanitize_plan(revised)
+    return revised
 
 
 # ============================================================
