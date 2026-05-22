@@ -1,6 +1,6 @@
 'use client';
 import { useState, useMemo } from 'react';
-import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon, History } from 'lucide-react';
+import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon, History, Settings } from 'lucide-react';
 import { GenerateFormats, type FormatCard } from './GenerateFormats';
 import { JobResultModal } from './JobResultModal';
 import { VideoAgentCard } from './VideoAgentCard';
@@ -218,6 +218,12 @@ export function StudioMain() {
           <span className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-md bg-gradient-to-r from-amber-500 to-rose-500 text-white text-[9px] font-bold">
             30% OFF
           </span>
+        </a>
+        <a
+          href="/admin"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition"
+        >
+          <Settings className="w-3.5 h-3.5 text-brand-300" /> Admin
         </a>
         <button
           onClick={() => setShowHistory(true)}

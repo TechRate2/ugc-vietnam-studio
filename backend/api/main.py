@@ -87,7 +87,7 @@ app.add_middleware(
 # Legacy /jobs/* render endpoints kept for the existing Studio V4 modal until FE swap completes.
 from api.routes import (  # noqa: E402
     jobs, avatars, video_direct, image_direct, media_upload,
-    audio_direct, llm_direct, director, assets,
+    audio_direct, llm_direct, director, assets, admin,
 )
 
 # V3 — Director Agent (Continuity Bible + Shot List + Reference Chaining)
@@ -95,6 +95,9 @@ app.include_router(director.router, prefix="/api/v1/director", tags=["director-v
 
 # Asset Library — reusable Character / Product / Storyboard refs
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
+
+# Admin Panel — Style Preset Library / Prompt Library / Credits / Routing config
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 
 # Direct vendor calls (used by manual playground + by Director storyboard/audio fill)
 app.include_router(avatars.router, prefix="/api/v1/avatars", tags=["avatars"])
