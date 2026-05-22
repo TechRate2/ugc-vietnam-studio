@@ -160,6 +160,9 @@ export interface DirectorPlan {
 export interface PlanRequest {
   product_input: { url?: string; text_description?: string; image_urls?: string[] };
   reference_images: string[];
+  /** Optional per-image role hints (same length as reference_images, null = AI auto-detect).
+   *  Backend uses these to skip the vision pass when zones tagged refs explicitly. */
+  reference_role_hints?: (string | null)[];
   reference_videos: string[];
   user_brief: string;
   context_injection: {

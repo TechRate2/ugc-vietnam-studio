@@ -48,15 +48,24 @@ MODEL_FORMAT_HINTS: dict[str, str] = {
     "seedance_2_0_fast_i2v": "i2v_motion",
     "seedance_v15_pro_i2v": "time_coded",
     "vidu_q3_ref": "single_descriptive",
-    "vidu_q3_mix_ref": "single_descriptive",
+    "vidu_q3_mix_ref": "multi_ref_tagged",
     "wan_2_7_i2v": "i2v_motion",
 }
 
 _PROMPT_MAX_LEN = {
     "multi_shot_inline": 1200,
+    "multi_ref_tagged": 1000,
     "time_coded": 800,
     "i2v_motion": 600,
     "single_descriptive": 600,
+}
+
+# Models that natively understand `@image_N` / `@imageN` token references
+# in the prompt body (per AtlasCloud spec). For these we render explicit tags.
+_MODELS_SUPPORT_IMAGE_TAGS = {
+    "seedance_2_0_ref",
+    "seedance_2_0_fast_ref",
+    "vidu_q3_mix_ref",
 }
 
 
@@ -232,6 +241,20 @@ def generate_scene(
             prompt = _deterministic_build_prompt(bible, shot, model_key)
     else:
         prompt = _deterministic_build_prompt(bible, shot, model_key)
+
+    # ---- Inject @image_N tags for models that support them -------------------
+    # AtlasCloud Seedance 2.0 ref + Vidu Q3 Mix bind references positionally via
+    # `@image_N` tokens in the prompt body. If the LLM didn't already include
+    # them (and refs are present), append a tag suffix so the renderer knows
+    # which image to map to which subject.
+    if (
+        render_mode == "ref_to_video"
+        and ref_urls
+        and model_key in _MODELS_SUPPORT_IMAGE_TAGS
+        and "@image" not in prompt.lower()
+    ):
+        tag_list = " ".join(f"@image_{i + 1}" for i in range(len(ref_urls)))
+        prompt = f"{prompt.rstrip()} Use references: {tag_list}."
 
     # ---- Clamp prompt length per model ---------------------------------------
     hint = MODEL_FORMAT_HINTS.get(model_key, "single_descriptive")

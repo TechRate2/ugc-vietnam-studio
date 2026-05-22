@@ -35,7 +35,9 @@ from loguru import logger
 from agent.schemas import DirectorPlan, Shot
 from agent import continuity_manager, scene_generation_agent
 from vendors.atlascloud import atlas_client
+from vendors import r2_storage
 from workers.assemble_worker import AssembleWorker
+from workers import cost_gate
 
 
 # ============================================================
@@ -81,26 +83,104 @@ async def render_plan(
     audio_plan: Optional[dict] = None,
     jobs_store: Optional[dict] = None,
     use_llm_scene_gen: bool = True,
+    cost_gate_mode: str = "off",
+    cost_gate_threshold: float = 7.0,
 ) -> dict:
     """Render a full DirectorPlan → final MP4.
 
     Args:
-        job_id: UUID for tracking
-        plan: validated DirectorPlan from Director Agent V3
-        reference_images: full ordered list of uploaded refs (universal pool)
+        job_id: UUID for tracking.
+        plan: Validated DirectorPlan from Director Agent V3.
+        reference_images: Full ordered list of uploaded refs (universal pool).
         user_model: vidu_q3 / wan_2_7 / seedance_2_0 / auto / ...
         resolution: 720p / 1080p / ...
-        audio_plan: optional {mode, voice_audio_url, sfx_audio_url, caption_text_vn}
-        jobs_store: optional in-memory job state dict
-        use_llm_scene_gen: True = Scene Generation Agent LLM call per shot
-                           False = deterministic prompt build (no LLM, faster)
+        audio_plan: Optional {mode, voice_audio_url, sfx_audio_url, caption_text_vn}.
+        jobs_store: Optional in-memory job state dict.
+        use_llm_scene_gen: True = Scene Generation Agent LLM call per shot.
+                           False = deterministic prompt build (no LLM, faster).
+        cost_gate_mode: "off" (default) renders the full plan immediately.
+                        "draft_first" renders shot[0] using the Fast tier first,
+                        evaluates it against the Bible, then proceeds to render
+                        the remaining N-1 shots ONLY if score >= threshold.
+                        On fail, the job is marked `failed` with suggestions
+                        and the user is invited to refine the plan.
+        cost_gate_threshold: 0-10 score required to pass the gate (default 7.0).
 
     Returns:
-        {output_path, scene_count, total_duration_s, last_frames_used}
+        {output_path, output_url, scene_count, total_duration_s, chain, cost_gate?}
     """
     bible = plan.continuity_bible
     shots = plan.shot_list
     ref_key_default, i2v_key_default = _resolve_models(user_model)
+
+    # ---- Optional Cost Gate (Stage 0) ----------------------------------------
+    # Render shot[0] with the Fast tier, then eval. If pass → continue with the
+    # user's chosen model for the rest. If fail → fail-fast, save 80-90% spend.
+    cost_gate_outcome: Optional[dict] = None
+    if cost_gate_mode == "draft_first" and len(shots) > 0:
+        _update_job(jobs_store, job_id, status="rendering", progress=5,
+                    current_step="cost_gate_draft")
+        draft_user_model = cost_gate.draft_model_for(user_model)
+        draft_ref_key, _ = _resolve_models(draft_user_model)
+        draft_shot = shots[0]
+
+        draft_job = await asyncio.to_thread(
+            scene_generation_agent.generate_scene,
+            bible=bible,
+            shot=draft_shot,
+            model_key=draft_ref_key,
+            reference_images=reference_images,
+            last_frame_url=None,
+            llm_mode=use_llm_scene_gen,
+            resolution=resolution,
+            is_last_shot=False,
+        )
+        try:
+            draft_result = await asyncio.to_thread(
+                atlas_client.generate_video, **draft_job.to_atlas_kwargs()
+            )
+        except Exception as e:
+            logger.warning(f"[cost_gate] draft render fail — skipping gate: {e}")
+            draft_result = None
+
+        if draft_result and draft_result.get("video_url"):
+            decision = await asyncio.to_thread(
+                cost_gate.evaluate_draft_clip,
+                plan_dict=plan.model_dump(),
+                draft_shot_id=draft_shot.shot_id,
+                threshold=cost_gate_threshold,
+            )
+            cost_gate_outcome = {
+                "passed": decision.pass_,
+                "score": decision.score,
+                "threshold": decision.threshold,
+                "reasoning": decision.reasoning,
+                "suggestions": decision.suggestions,
+                "draft_model": draft_user_model,
+                "draft_video_url": draft_result["video_url"],
+            }
+            _update_job(jobs_store, job_id, cost_gate=cost_gate_outcome)
+            logger.info(
+                f"[cost_gate] {job_id} draft score={decision.score} "
+                f"threshold={decision.threshold} → {'PASS' if decision.pass_ else 'FAIL'}"
+            )
+            if not decision.pass_:
+                _update_job(
+                    jobs_store, job_id,
+                    status="failed", progress=10, current_step="cost_gate_failed",
+                    error_message=(
+                        f"Cost-gate failed (score {decision.score} < {decision.threshold}). "
+                        f"Suggestions: {'; '.join(decision.suggestions[:3])}"
+                    ),
+                )
+                return {
+                    "output_path": None,
+                    "output_url": None,
+                    "scene_count": len(shots),
+                    "total_duration_s": sum(s.duration_s for s in shots),
+                    "cost_gate": cost_gate_outcome,
+                    "aborted": True,
+                }
 
     _update_job(jobs_store, job_id, status="rendering", progress=10,
                 current_step="scene_gen", scene_count=len(shots))
@@ -208,23 +288,136 @@ async def render_plan(
         bible_color_grading=bible.visual_style.color_grading,
     )
 
+    # Stage 5 — Upload to R2 (graceful fallback to file:// when not configured)
+    _update_job(jobs_store, job_id, status="uploading", progress=95, current_step="r2_upload")
+    r2_key = f"video/{job_id}/final.mp4"
+    output_url = await r2_storage.upload_with_fallback(
+        color_pass_mp4, key=r2_key, content_type="video/mp4",
+    )
+
     _update_job(
         jobs_store, job_id,
         status="done", progress=100, current_step="done",
         output_path=str(color_pass_mp4),
+        output_url=output_url,
         duration_s=sum(s.duration_s for s in shots),
     )
 
     logger.info(
         f"[VideoWorker V3] {job_id} DONE — {len(shots)} shots, "
-        f"{sum(s.duration_s for s in shots)}s total → {color_pass_mp4}"
+        f"{sum(s.duration_s for s in shots)}s total → {output_url}"
     )
 
     return {
         "output_path": str(color_pass_mp4),
+        "output_url": output_url,
         "scene_count": len(shots),
         "total_duration_s": sum(s.duration_s for s in shots),
         "chain": chain_meta,
+        "cost_gate": cost_gate_outcome,
+    }
+
+
+# ============================================================
+# Refine — re-render a single shot (Evaluation-driven)
+# ============================================================
+async def render_single_shot(
+    job_id: str,
+    plan: DirectorPlan,
+    shot_id: str,
+    reference_images: list[str],
+    user_model: str,
+    resolution: str,
+    *,
+    previous_last_frame_url: Optional[str] = None,
+    jobs_store: Optional[dict] = None,
+    use_llm_scene_gen: bool = True,
+) -> dict:
+    """Render ONE shot (used by `/director/refine`).
+
+    The caller already has the full plan; this just re-renders one shot,
+    optionally chained from the previous shot's last frame so the new clip
+    drops back into the timeline without identity drift.
+
+    Returns `{shot_id, video_url, last_frame_url, render_mode, model_key}`.
+    The caller is responsible for stitching the replacement clip back into
+    the assembled video (typically by re-running FFmpeg concat with the new
+    clip swapped in at the right slot).
+    """
+    shot = next((s for s in plan.shot_list if s.shot_id == shot_id), None)
+    if shot is None:
+        raise ValueError(f"shot_id '{shot_id}' not in plan {plan.plan_id}")
+
+    bible = plan.continuity_bible
+    ref_key_default, i2v_key_default = _resolve_models(user_model)
+    per_shot = shot.model_routing.preferred_model
+    if per_shot and per_shot != "auto":
+        ref_key, i2v_key = _resolve_models(per_shot)
+    else:
+        ref_key, i2v_key = ref_key_default, i2v_key_default
+
+    will_chain = (
+        shot.continuity.previous_shot_id is not None
+        and previous_last_frame_url is not None
+    )
+    active_model_key = i2v_key if will_chain else ref_key
+
+    _update_job(jobs_store, job_id, status="rendering", progress=20,
+                current_step=f"refine_{shot_id}")
+
+    scene_job = await asyncio.to_thread(
+        scene_generation_agent.generate_scene,
+        bible=bible,
+        shot=shot,
+        model_key=active_model_key,
+        reference_images=reference_images,
+        last_frame_url=previous_last_frame_url if will_chain else None,
+        llm_mode=use_llm_scene_gen,
+        resolution=resolution,
+        is_last_shot=False,  # refine always returns last_frame (to chain forward)
+    )
+
+    kwargs = scene_job.to_atlas_kwargs()
+    kwargs["poll_interval_s"] = 5
+    kwargs["timeout_s"] = 600
+
+    logger.info(
+        f"[VideoWorker V3] refine {job_id} {shot.shot_id} mode={scene_job.render_mode} "
+        f"model={scene_job.model_key} dur={scene_job.duration_s}s"
+    )
+    result = await asyncio.to_thread(atlas_client.generate_video, **kwargs)
+    clip_url = result.get("video_url")
+    if not clip_url:
+        raise RuntimeError(f"refine {shot_id}: AtlasCloud returned no video_url")
+
+    work_dir = Path(tempfile.gettempdir()) / f"cineforge_refine_{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = work_dir / f"refined_{shot_id}.mp4"
+    await _download_file(clip_url, clip_path)
+
+    # Upload to R2 (graceful fallback to file://)
+    _update_job(jobs_store, job_id, status="uploading", progress=90, current_step="r2_upload")
+    r2_key = f"refine/{job_id}/{shot_id}.mp4"
+    output_url = await r2_storage.upload_with_fallback(
+        clip_path, key=r2_key, content_type="video/mp4",
+    )
+
+    _update_job(
+        jobs_store, job_id,
+        status="done", progress=100, current_step="done",
+        output_path=str(clip_path),
+        output_url=output_url,
+    )
+
+    return {
+        "shot_id": shot_id,
+        "video_url": clip_url,
+        "output_url": output_url,
+        "last_frame_url": result.get("last_frame_url"),
+        "render_mode": scene_job.render_mode,
+        "model_key": scene_job.model_key,
+        "duration_s": scene_job.duration_s,
+        "output_path": str(clip_path),
     }
 
 

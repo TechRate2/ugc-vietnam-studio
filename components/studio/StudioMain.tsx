@@ -7,6 +7,7 @@ import { VideoAgentCard } from './VideoAgentCard';
 import { ContextInjection } from './ContextInjection';
 import { AdvancedPanel } from './AdvancedPanel';
 import { DirectorPlanModal, useDirectorJobPoll } from './DirectorPlanModal';
+import { ReferenceZones, type ReferenceZonesValue } from './ReferenceZones';
 // V3 Director-only context-injection types (kept locally to avoid the removed use-propose-job hook)
 type ContextInjectionType = {
   pain_points?: string;
@@ -47,7 +48,26 @@ export function StudioMain() {
   const [prompt, setPrompt] = useState('');
 
   // References (1-12 depend on model, UI cap 5)
-  const [referenceImages, setReferenceImages] = useState<string[]>([]);
+  // V3 §5: split into 3 zones (character / product / storyboard) for clearer
+  // role tagging — the Director Agent gets pre-classified refs instead of
+  // having to guess via a vision pass.
+  const [referenceZones, setReferenceZones] = useState<ReferenceZonesValue>({
+    images: [],
+    roles: [],
+    storyboardImages: [],
+  });
+  // Compatibility: VideoAgentCard still expects a flat string[] for the
+  // existing `@Image N` mention UI. We mirror the zone state into a flat list.
+  const referenceImages = referenceZones.images;
+  const setReferenceImages = (next: string[]) => {
+    // Manual edit from VideoAgentCard removes images by URL — preserve roles
+    const nextRoles = next.map((url) => {
+      const idx = referenceZones.images.indexOf(url);
+      return idx >= 0 ? referenceZones.roles[idx] : null;
+    });
+    const nextStoryboard = referenceZones.storyboardImages.filter((u) => next.includes(u));
+    setReferenceZones({ images: next, roles: nextRoles, storyboardImages: nextStoryboard });
+  };
 
   // Settings — init resolution theo default của model
   const [model, setModel] = useState<VideoModel>('seedance_2_0');
@@ -114,6 +134,9 @@ export function StudioMain() {
         image_urls: productImg ? [productImg] : [],
       },
       reference_images: referenceImages,
+      // V3 §5: pre-tagged roles from ReferenceZones — Director skips vision
+      // pass for these refs and goes straight to apply_to_shots binding.
+      reference_role_hints: referenceZones.roles,
       reference_videos: referenceVideos,
       user_brief: prompt,
       context_injection: context,
@@ -284,6 +307,9 @@ export function StudioMain() {
 
           {/* Row 3 — Context Injection (giữ collapse riêng vì 5 field dài) */}
           <ContextInjection value={context} onChange={setContext} />
+
+          {/* Row 4 — Reference Pack: 3 zones (Character / Product / Storyboard) */}
+          <ReferenceZones value={referenceZones} onChange={setReferenceZones} />
         </AdvancedPanel>
 
         {/* ===== MAIN COMPACT CARD (kiểu Topview Video Agent V2) ===== */}

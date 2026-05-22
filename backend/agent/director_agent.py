@@ -75,9 +75,17 @@ class DirectorAgent:
         context_injection: dict,
         tech_config: dict,
         niche_hint: Optional[str] = None,
+        reference_role_hints: Optional[list[Optional[str]]] = None,
         progress_callback: ProgressCallback = None,
     ) -> DirectorPlan:
-        """Main entry — return validated DirectorPlan."""
+        """Main entry — return validated DirectorPlan.
+
+        Args:
+            reference_role_hints: Optional per-image role pre-tags (same length
+                as `reference_images`). When supplied, the vision-pass is
+                skipped and these tags are used directly as the role hint
+                fed into the Director LLM. Saves ~1 LLM call.
+        """
 
         async def _emit(stage: str, status: str, **extra) -> None:
             if progress_callback is None:
@@ -100,18 +108,30 @@ class DirectorAgent:
 
         await _emit("init", "running", plan_id=plan_id)
 
-        # ===== Stage A: optional vision scan refs (role hint) =====
+        # ===== Stage A: ref role classification =====
+        # Prefer user-supplied role hints (from the 3-zone uploader in Studio V4)
+        # — skips an LLM vision call. Fall back to vision pass when hints absent.
         ref_hints: list[dict] = []
         if reference_images:
-            await _emit("vision", "running", message="Scanning reference images")
-            try:
-                ref_hints = await asyncio.to_thread(
-                    self._vision_scan_refs, reference_images,
-                )
-            except Exception as e:
-                logger.warning(f"[DirectorAgent] vision scan fail (continuing): {e}")
-                ref_hints = []
-            await _emit("vision", "done", classified=len(ref_hints))
+            if reference_role_hints and any(h for h in reference_role_hints):
+                ref_hints = [
+                    {"index": i, "role": (reference_role_hints[i] or "unknown")
+                                          if i < len(reference_role_hints) else "unknown",
+                     "notes": "user-tagged"}
+                    for i in range(len(reference_images))
+                ]
+                await _emit("vision", "done", classified=len(ref_hints), source="user_tagged")
+                logger.info(f"[DirectorAgent] using {len(ref_hints)} user-tagged role hints — skip vision scan")
+            else:
+                await _emit("vision", "running", message="Scanning reference images")
+                try:
+                    ref_hints = await asyncio.to_thread(
+                        self._vision_scan_refs, reference_images,
+                    )
+                except Exception as e:
+                    logger.warning(f"[DirectorAgent] vision scan fail (continuing): {e}")
+                    ref_hints = []
+                await _emit("vision", "done", classified=len(ref_hints), source="vision_llm")
 
         # ===== Stage B: Build prompt context for Director LLM =====
         await _emit("director", "running", message="Director composing plan")

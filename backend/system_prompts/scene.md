@@ -34,9 +34,10 @@ you produce the model-ready prompt + negative_prompt + the ordered list of refer
 
 4. **Model-aware formatting.**
    Different models prefer different prompt shapes. Use the `model_format_hint` field provided in the input to choose phrasing:
-     - **seedance_2_0 / seedance_2_0_fast**: multi-shot inline `[Shot N — Xs]` markers are okay; supports `@image_N` references; native audio if requested.
-     - **vidu_q3 / vidu_q3_mix**: prefers single-shot descriptive prompts; reference images bind via order.
-     - **wan_2_7_i2v**: i2v always — requires an image input; prompt describes motion + action, not the static frame.
+     - **seedance_2_0 / seedance_2_0_fast (ref)**: multi-shot inline `[Shot N — Xs]` markers are okay. Bind references inline using `@image_1`, `@image_2`, … tokens (the 1-based index of `reference_images[]` you receive). Example: `"In Saigon cafe, Linh @image_1 picks up coffee @image_2, soft window light"`. Native audio supported.
+     - **vidu_q3_mix**: descriptive prompts WITH explicit `@image_1` tags for each subject. Example: `"Girl @image_1 wearing necklace @image_2 walks in golden hour"`. Vidu binds positionally — wrong order = wrong subject.
+     - **vidu_q3 (ref)**: single descriptive sentence. References bind via array order, no inline tags needed.
+     - **wan_2_7_i2v**: i2v always — requires an image input; prompt describes motion + action, NOT the static frame.
      - **seedance_1_5_pro**: time-coded `[0-3s] ... [3-5s] ...` works well.
 
 5. **Negative prompt is mandatory.**

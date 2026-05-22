@@ -55,6 +55,17 @@ class ContextInjection(BaseModel):
 class PlanRequest(BaseModel):
     product_input: ProductInput
     reference_images: list[str] = Field(default_factory=list, max_length=12)
+    reference_role_hints: list[Optional[str]] = Field(
+        default_factory=list,
+        max_length=12,
+        description=(
+            "Per-image role hints (same length as reference_images, null = AI "
+            "auto-detect). Allowed roles match agent/schemas.ReferenceAsset.role: "
+            "primary_subject | secondary_subject | product_hero | product_detail | "
+            "style_reference | environment | brand_asset. When supplied, Director "
+            "skips the vision-pass for these refs."
+        ),
+    )
     reference_videos: list[str] = Field(default_factory=list, max_length=1)
     user_brief: str = Field("", max_length=3000)
     context_injection: ContextInjection = Field(default_factory=ContextInjection)
@@ -95,6 +106,17 @@ class GenerateRequest(BaseModel):
         description="True = 1 LLM call per shot for adaptive prompt (slow, best). "
                     "False = deterministic build (fast, cheap).",
     )
+    cost_gate_mode: str = Field(
+        "off",
+        description="`off` (default) → render full plan immediately. "
+                    "`draft_first` → render shot[0] using Fast tier, evaluate, "
+                    "then continue only if score ≥ cost_gate_threshold. "
+                    "Saves 80-90% credits when a plan would fail.",
+    )
+    cost_gate_threshold: float = Field(
+        7.0, ge=0, le=10,
+        description="Pass threshold for cost_gate_mode='draft_first' (default 7.0/10).",
+    )
 
 
 class PlanAndRenderRequest(BaseModel):
@@ -106,6 +128,35 @@ class PlanAndRenderRequest(BaseModel):
     """
     plan_request: PlanRequest
     audio_plan: Optional[dict] = None
+    use_llm_scene_gen: bool = True
+
+
+class RefineRequest(BaseModel):
+    """Re-render ONE shot from an existing plan.
+
+    Trigger: Evaluation Layer flagged a shot (low score / red_flag), OR user
+    eyeballed the final video and wants to redo a specific shot only — without
+    burning credits on the whole video.
+
+    Optionally pass `previous_last_frame_url` from the original render's chain
+    metadata to keep identity continuity with the prior shot. If omitted and
+    the shot has `previous_shot_id`, refine falls back to ref-mode (slight
+    drift possible).
+
+    Optional `shot_overrides` lets the user nudge the shot before re-render
+    (e.g. tweak `visual.action`, change `duration_s`). The override is shallow-
+    merged into the plan's shot before generation; the rest of the plan stays
+    intact.
+    """
+    plan: DirectorPlan
+    shot_id: str
+    reference_images: list[str] = Field(default_factory=list, max_length=12)
+    settings: VideoSettings
+    previous_last_frame_url: Optional[str] = None
+    shot_overrides: Optional[dict] = Field(
+        None,
+        description="Shallow-merge overrides for the target shot (e.g. {'visual': {'action': 'now smiles'}}).",
+    )
     use_llm_scene_gen: bool = True
 
 
@@ -142,6 +193,7 @@ async def create_plan(request: PlanRequest):
             context_injection=request.context_injection.model_dump(exclude_none=True),
             tech_config=tech_config,
             niche_hint=request.niche_hint,
+            reference_role_hints=request.reference_role_hints or None,
         )
     except Exception as e:
         logger.exception("[/director/plan] failed")
@@ -190,6 +242,7 @@ async def create_plan_stream(request: PlanRequest, raw_request: Request):
                 context_injection=request.context_injection.model_dump(exclude_none=True),
                 tech_config=tech_config,
                 niche_hint=request.niche_hint,
+                reference_role_hints=request.reference_role_hints or None,
                 progress_callback=_cb,
             )
             await event_queue.put(("complete", plan.model_dump()))
@@ -332,6 +385,8 @@ async def generate_video(request: GenerateRequest):
                 audio_plan=request.audio_plan,
                 jobs_store=_JOBS_STORE,
                 use_llm_scene_gen=request.use_llm_scene_gen,
+                cost_gate_mode=request.cost_gate_mode,
+                cost_gate_threshold=request.cost_gate_threshold,
             )
         except Exception as e:
             logger.exception(f"[/director/generate] job {job_id} failed")
@@ -346,6 +401,7 @@ async def generate_video(request: GenerateRequest):
         "estimated_cost_usd": sanitized_plan.cost_estimate.total_cost_usd,
         "plan_id": sanitized_plan.plan_id,
         "mode": "approved",
+        "cost_gate_mode": request.cost_gate_mode,
     }
 
 
@@ -398,6 +454,7 @@ async def plan_and_render(request: PlanAndRenderRequest):
                 context_injection=pr.context_injection.model_dump(exclude_none=True),
                 tech_config=tech_config,
                 niche_hint=pr.niche_hint,
+                reference_role_hints=pr.reference_role_hints or None,
             )
             _JOBS_STORE[job_id]["plan_id"] = plan_built.plan_id
 
@@ -436,6 +493,78 @@ async def plan_and_render(request: PlanAndRenderRequest):
         "estimated_cost_usd": 0.0,  # unknown until plan() returns
         "plan_id": None,
         "mode": "plan_and_render",
+    }
+
+
+# ============================================================
+# POST /refine — re-render ONE shot
+# ============================================================
+@router.post("/refine")
+async def refine_shot(request: RefineRequest):
+    """Re-render a single shot from an approved plan (Evaluation-driven flow).
+
+    Cost: 1 shot × per-second model price (vs. full plan re-render). Typical
+    use: Evaluation flagged `S3` as `consistency_score=5.2` → user clicks
+    "Refine S3" → this endpoint regenerates just that clip.
+    """
+    # Validate shot exists
+    target = next((s for s in request.plan.shot_list if s.shot_id == request.shot_id), None)
+    if target is None:
+        raise HTTPException(404, f"shot_id '{request.shot_id}' not in plan")
+
+    # Apply shot overrides (shallow merge into the target shot)
+    plan_for_refine = request.plan
+    if request.shot_overrides:
+        plan_copy = request.plan.model_copy(deep=True)
+        target_copy = next(s for s in plan_copy.shot_list if s.shot_id == request.shot_id)
+        # Shallow merge — for nested visual/audio/continuity dicts, take user override entirely
+        for k, v in request.shot_overrides.items():
+            if hasattr(target_copy, k):
+                if isinstance(v, dict) and hasattr(getattr(target_copy, k), "model_fields"):
+                    sub = getattr(target_copy, k)
+                    for sk, sv in v.items():
+                        if hasattr(sub, sk):
+                            setattr(sub, sk, sv)
+                else:
+                    setattr(target_copy, k, v)
+        plan_for_refine = plan_copy
+
+    job_id = f"refine_{uuid.uuid4().hex[:12]}"
+    _JOBS_STORE[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "current_step": "queued",
+        "plan_id": request.plan.plan_id,
+        "shot_id": request.shot_id,
+        "mode": "refine",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    async def _run():
+        try:
+            result = await video_worker.render_single_shot(
+                job_id=job_id,
+                plan=plan_for_refine,
+                shot_id=request.shot_id,
+                reference_images=request.reference_images,
+                user_model=request.settings.model,
+                resolution=request.settings.resolution,
+                previous_last_frame_url=request.previous_last_frame_url,
+                jobs_store=_JOBS_STORE,
+                use_llm_scene_gen=request.use_llm_scene_gen,
+            )
+            _JOBS_STORE[job_id].update(refine_result=result)
+        except Exception as e:
+            logger.exception(f"[/director/refine] {job_id} failed")
+            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+
+    asyncio.create_task(_run())
+    return {
+        "job_id": job_id,
+        "polling_url": f"/api/v1/director/jobs/{job_id}",
+        "shot_id": request.shot_id,
+        "estimated_duration_s": target.duration_s,
+        "mode": "refine",
     }
 
 

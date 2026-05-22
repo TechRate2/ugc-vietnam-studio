@@ -235,7 +235,10 @@ Layer 3 — render an **approved** DirectorPlan (canonical Human-in-the-Loop pat
   "reference_images": [ ... ],
   "settings": { "audio_mode": "...", "model": "...", "duration_s": 15, ... },
   "audio_plan": null,
-  "use_llm_scene_gen": true
+  "use_llm_scene_gen": true,
+  // V3 §7 Cost Optimization:
+  "cost_gate_mode": "off",          // "off" | "draft_first"
+  "cost_gate_threshold": 7.0        // 0-10, pass threshold for draft_first mode
 }
 
 // Response
@@ -245,13 +248,20 @@ Layer 3 — render an **approved** DirectorPlan (canonical Human-in-the-Loop pat
   "estimated_duration_s": 15,
   "estimated_cost_usd": 1.48,
   "plan_id": "dp_...",
-  "mode": "approved"
+  "mode": "approved",
+  "cost_gate_mode": "off"
 }
 ```
 
 Flow: server runs `continuity_manager.validate_plan()` → if any hard error, 400.
 Soft warnings are kept on the job record and `sanitize_plan()` cleans bad refs.
 Then `video_worker.render_plan()` is dispatched in the background.
+
+**Cost gate** (`cost_gate_mode="draft_first"`): renders shot[0] with the Fast
+tier (e.g. `seedance_2_0_fast`), evaluates consistency + brand_safety against
+the Bible, and aborts before spending Standard-tier credits if the score is
+below `cost_gate_threshold`. Failed jobs return `cost_gate.suggestions[]` so
+the user knows what to fix.
 
 ### `POST /api/v1/director/plan-and-render`
 
@@ -267,6 +277,42 @@ Useful for automated batches / CLI jobs. Returns the same shape as `/generate`.
 ```
 
 Job state machine: `pending → planning → rendering → assembling → done`.
+
+### `POST /api/v1/director/refine`
+
+Re-render ONE shot from an approved plan (Evaluation-driven flow). Use when the
+Evaluation Layer (or the user) flagged a specific shot as low-quality —
+regenerate just that clip instead of the whole video.
+
+```jsonc
+// Request
+{
+  "plan": { ...full DirectorPlan with the shot to refine... },
+  "shot_id": "S3",
+  "reference_images": [ ... ],
+  "settings": { ... },
+  // Optional: pass the chain anchor frame from the original render so the
+  // refined clip drops back into the timeline without identity drift.
+  "previous_last_frame_url": "https://...",
+  // Optional: nudge the shot before re-render (shallow-merged into plan.shot_list[i])
+  "shot_overrides": {
+    "visual": { "action": "now smiles softly" },
+    "duration_s": 4
+  }
+}
+
+// Response — same polling shape, status: pending → rendering → uploading → done
+{
+  "job_id": "refine_xxxxx",
+  "polling_url": "/api/v1/director/jobs/refine_xxxxx",
+  "shot_id": "S3",
+  "estimated_duration_s": 4,
+  "mode": "refine"
+}
+```
+
+Cost: 1 shot × per-second model price (vs. full plan re-render). The refined
+clip is uploaded to R2 (or `file://` fallback) at `refine/{job_id}/{shot_id}.mp4`.
 
 ### `GET /api/v1/director/jobs/{job_id}` · `POST .../cancel`
 
@@ -418,6 +464,51 @@ Mở rộng dễ: edit `workers/video_worker.py::_apply_color_consistency`.
 | Shot quên `previous_shot_id` → identity drift | LLM bỏ qua chain hint | `continuity_manager.auto_chain_shots()` auto fill, hoặc edit shot ở UI |
 | `last_frame_url` null → chain shot fallback ref | AtlasCloud model không trả last_frame | Check `model_specs.py` model có support `return_last_frame=true` không |
 | Color consistency pass fail | FFmpeg filter sai trên ungraded clip | Pass skip + log warning, MP4 vẫn xuất (chỉ thiếu grading) |
+
+---
+
+## 11.5. Cloudflare R2 storage
+
+`backend/vendors/r2_storage.py` uploads the final MP4 (and refined shots) to R2
+via boto3 (S3-compatible API). Configured via these env vars:
+
+```
+R2_ACCOUNT_ID=xxxxxxxx
+R2_ACCESS_KEY_ID=xxxxxxxx
+R2_SECRET_ACCESS_KEY=xxxxxxxx
+R2_BUCKET_NAME=ugc-vietnam-output
+R2_PUBLIC_URL=https://cdn.yourdomain.com   # optional custom domain
+```
+
+**Graceful fallback**: if any required var is missing, the worker returns a
+`file://` URL pointing at the local clip — local dev works without Cloudflare.
+Upload errors are caught and also fall back to `file://` (so a flaky R2 won't
+kill the whole render).
+
+The R2 object key is `video/{job_id}/final.mp4` for full renders and
+`refine/{job_id}/{shot_id}.mp4` for single-shot refines. Set the bucket public
+or front it with a Cloudflare Worker / custom domain to serve clips to users.
+
+---
+
+## 11.6. Reference Zones (v2.1 §5)
+
+The frontend `components/studio/ReferenceZones.tsx` splits the single
+`reference_images[]` upload into THREE buckets:
+
+| Zone | Default role tag | What goes here |
+|---|---|---|
+| **Character** | `primary_subject` | Face / outfit anchor — applied to most shots |
+| **Product / Props** | `product_hero` | The product or main prop being showcased |
+| **Storyboard** | `style_reference` | Pre-composed frames for composition / style |
+
+Frontend sends both `reference_images[]` (flat URL list) AND
+`reference_role_hints[]` (parallel role list). The Director Agent uses the
+hints to **skip the vision-pass classification** — saves an LLM call and
+guarantees the role tag the user intended.
+
+If `reference_role_hints` is omitted (or all-null), the Director falls back to
+the vision-pass LLM (`agent.director_agent._vision_scan_refs`).
 
 ---
 
