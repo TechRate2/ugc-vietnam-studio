@@ -74,22 +74,16 @@ class StoryboardRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    """Dual-mode request — pass exactly ONE of `plan` or `plan_request`.
+    """Render an approved DirectorPlan (canonical Human-in-the-Loop path).
 
-    MODE A (Human-in-the-Loop, recommended):
-        plan = the full DirectorPlan the user reviewed & approved (possibly edited).
+    Use this when the user has reviewed (and optionally edited) the plan in the
+    DirectorPlanModal. Pass the plan back verbatim — the server will
+    re-validate continuity, sanitize, then dispatch render.
 
-    MODE B (Auto plan-then-render, skip review):
-        plan_request = the same payload shape as POST /api/v1/director/plan.
-        The server will call `director.plan()` first, then immediately render.
-
-    Mutual exclusion is enforced — passing both → 400.
+    For the rare case of "just plan and render in one shot" (skip review), use
+    POST /api/v1/director/plan-and-render instead.
     """
-    plan: Optional[DirectorPlan] = None
-    plan_request: Optional[PlanRequest] = Field(
-        None,
-        description="If set (and plan=null), server calls director.plan() then renders.",
-    )
+    plan: DirectorPlan
     reference_images: list[str] = Field(default_factory=list, max_length=12)
     settings: VideoSettings
     audio_plan: Optional[dict] = Field(
@@ -101,6 +95,18 @@ class GenerateRequest(BaseModel):
         description="True = 1 LLM call per shot for adaptive prompt (slow, best). "
                     "False = deterministic build (fast, cheap).",
     )
+
+
+class PlanAndRenderRequest(BaseModel):
+    """One-shot: build plan + render immediately, no Human-in-the-Loop pause.
+
+    Same input shape as POST /api/v1/director/plan, plus render settings +
+    optional audio_plan. Returns the same response shape as POST /generate so
+    clients can use a single polling path.
+    """
+    plan_request: PlanRequest
+    audio_plan: Optional[dict] = None
+    use_llm_scene_gen: bool = True
 
 
 # ============================================================
@@ -277,94 +283,49 @@ async def gen_storyboard(request: StoryboardRequest):
 
 
 # ============================================================
-# POST /generate — kick off video render
+# POST /generate — render an approved DirectorPlan (canonical path)
 # ============================================================
 @router.post("/generate")
 async def generate_video(request: GenerateRequest):
-    """Layer 3 — render an approved DirectorPlan (Mode A) OR plan-then-render (Mode B).
+    """Layer 3 — render an approved DirectorPlan.
 
-    Validates inputs, runs Continuity Manager checks against the plan to fail fast
-    on tampered data, then dispatches `video_worker.render_plan()` in the background.
+    Canonical Human-in-the-Loop entry: the frontend POSTs back the plan the user
+    just reviewed (or edited) in `DirectorPlanModal`. The server re-validates
+    continuity, sanitizes soft issues, then dispatches the render in the
+    background. Returns a `job_id` for polling at `/director/jobs/{id}`.
     """
-    # ---- Mutual-exclusion + presence check ----
-    if request.plan is None and request.plan_request is None:
-        raise HTTPException(
-            400,
-            "Provide either `plan` (approved DirectorPlan) or `plan_request` (build then render).",
+    # Validate continuity upfront → fail-fast 400 for tampered plans
+    try:
+        warnings = continuity_manager.validate_plan(
+            request.plan,
+            target_duration_s=request.settings.duration_s,
+            tolerance_s=2,
         )
-    if request.plan is not None and request.plan_request is not None:
-        raise HTTPException(
-            400,
-            "Pass exactly ONE of `plan` or `plan_request`, not both.",
-        )
+    except continuity_manager.ContinuityError as e:
+        raise HTTPException(400, f"Plan rejected by Continuity Manager: {e}") from e
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     _JOBS_STORE[job_id] = {
         "status": "pending",
         "progress": 0,
         "current_step": "queued",
-        "plan_id": request.plan.plan_id if request.plan else None,
-        "mode": "approved" if request.plan else "auto_plan",
+        "plan_id": request.plan.plan_id,
+        "mode": "approved",
+        "validation_warnings": warnings or [],
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
+    if warnings:
+        logger.warning(
+            f"[/director/generate] {job_id} plan warnings (will sanitize): {warnings[:5]}"
+        )
 
-    # ---- MODE B preflight (synchronous plan() call) ----
-    # We run Mode B's plan() inside the background task to keep response snappy,
-    # but Mode A can validate the supplied plan upfront for instant 4xx feedback.
-    if request.plan is not None:
-        try:
-            warnings = continuity_manager.validate_plan(
-                request.plan,
-                target_duration_s=request.settings.duration_s,
-                tolerance_s=2,
-            )
-            if warnings:
-                logger.warning(
-                    f"[/director/generate] {job_id} plan validation warnings: {warnings[:5]}"
-                )
-                _JOBS_STORE[job_id]["validation_warnings"] = warnings
-        except continuity_manager.ContinuityError as e:
-            del _JOBS_STORE[job_id]
-            raise HTTPException(400, f"Plan rejected by Continuity Manager: {e}") from e
+    sanitized_plan = continuity_manager.sanitize_plan(request.plan)
 
     async def _run():
         try:
-            plan_to_render = request.plan
-            # MODE B — build the plan first, then render
-            if plan_to_render is None:
-                assert request.plan_request is not None
-                _JOBS_STORE[job_id].update(status="planning", current_step="director_agent")
-                tech_config = {
-                    "duration_s": request.plan_request.settings.duration_s,
-                    "aspect_ratio": request.plan_request.settings.aspect_ratio,
-                    "audio_mode": request.plan_request.settings.audio_mode,
-                    "model": request.plan_request.settings.model,
-                    "resolution": request.plan_request.settings.resolution,
-                    "num_shots": request.plan_request.settings.num_shots,
-                }
-                plan_to_render = await director.plan(
-                    product_input=request.plan_request.product_input.model_dump(exclude_none=True),
-                    reference_images=request.plan_request.reference_images,
-                    reference_videos=request.plan_request.reference_videos,
-                    user_brief=request.plan_request.user_brief,
-                    context_injection=request.plan_request.context_injection.model_dump(exclude_none=True),
-                    tech_config=tech_config,
-                    niche_hint=request.plan_request.niche_hint,
-                )
-                _JOBS_STORE[job_id]["plan_id"] = plan_to_render.plan_id
-
-                # Re-validate the freshly built plan
-                warnings = continuity_manager.validate_plan(
-                    plan_to_render,
-                    target_duration_s=request.settings.duration_s,
-                    tolerance_s=2,
-                )
-                if warnings:
-                    _JOBS_STORE[job_id]["validation_warnings"] = warnings
-
             await video_worker.render_plan(
                 job_id=job_id,
-                plan=plan_to_render,
+                plan=sanitized_plan,
                 reference_images=request.reference_images,
                 user_model=request.settings.model,
                 resolution=request.settings.resolution,
@@ -378,22 +339,103 @@ async def generate_video(request: GenerateRequest):
 
     asyncio.create_task(_run())
 
-    # For Mode A, estimated_* uses the supplied plan. For Mode B we don't know
-    # shot count / cost yet — fall back to the settings.duration_s as a hint.
-    if request.plan is not None:
-        est_dur = sum(s.duration_s for s in request.plan.shot_list)
-        est_cost = request.plan.cost_estimate.total_cost_usd
-    else:
-        est_dur = request.settings.duration_s
-        est_cost = 0.0
+    return {
+        "job_id": job_id,
+        "polling_url": f"/api/v1/director/jobs/{job_id}",
+        "estimated_duration_s": sum(s.duration_s for s in sanitized_plan.shot_list),
+        "estimated_cost_usd": sanitized_plan.cost_estimate.total_cost_usd,
+        "plan_id": sanitized_plan.plan_id,
+        "mode": "approved",
+    }
+
+
+# ============================================================
+# POST /plan-and-render — one-shot escape hatch (no Human-in-the-Loop)
+# ============================================================
+@router.post("/plan-and-render")
+async def plan_and_render(request: PlanAndRenderRequest):
+    """Build a plan then render it immediately. Skips Human-in-the-Loop review.
+
+    Use cases:
+        - Automated batch jobs (CI / cron).
+        - CLI / scripted tools where there is no human reviewer.
+
+    The job state goes `pending → planning → rendering → assembling → done`.
+    Plan/eval cost is still incurred; clients that want savings should batch via
+    `/plan` + caching the DirectorPlan client-side instead.
+    """
+    pr = request.plan_request
+
+    if not (pr.product_input.url or pr.product_input.text_description or pr.user_brief):
+        raise HTTPException(400, "Provide brief or product_input on plan_request")
+
+    job_id = f"job_{uuid.uuid4().hex[:12]}"
+    _JOBS_STORE[job_id] = {
+        "status": "pending",
+        "progress": 0,
+        "current_step": "queued",
+        "plan_id": None,
+        "mode": "plan_and_render",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    async def _run():
+        try:
+            _JOBS_STORE[job_id].update(status="planning", current_step="director_agent")
+            tech_config = {
+                "duration_s": pr.settings.duration_s,
+                "aspect_ratio": pr.settings.aspect_ratio,
+                "audio_mode": pr.settings.audio_mode,
+                "model": pr.settings.model,
+                "resolution": pr.settings.resolution,
+                "num_shots": pr.settings.num_shots,
+            }
+            plan_built = await director.plan(
+                product_input=pr.product_input.model_dump(exclude_none=True),
+                reference_images=pr.reference_images,
+                reference_videos=pr.reference_videos,
+                user_brief=pr.user_brief,
+                context_injection=pr.context_injection.model_dump(exclude_none=True),
+                tech_config=tech_config,
+                niche_hint=pr.niche_hint,
+            )
+            _JOBS_STORE[job_id]["plan_id"] = plan_built.plan_id
+
+            warnings = continuity_manager.validate_plan(
+                plan_built,
+                target_duration_s=pr.settings.duration_s,
+                tolerance_s=2,
+            )
+            if warnings:
+                _JOBS_STORE[job_id]["validation_warnings"] = warnings
+                logger.warning(
+                    f"[/director/plan-and-render] {job_id} warnings: {warnings[:5]}"
+                )
+            plan_built = continuity_manager.sanitize_plan(plan_built)
+
+            await video_worker.render_plan(
+                job_id=job_id,
+                plan=plan_built,
+                reference_images=pr.reference_images,
+                user_model=pr.settings.model,
+                resolution=pr.settings.resolution,
+                audio_plan=request.audio_plan,
+                jobs_store=_JOBS_STORE,
+                use_llm_scene_gen=request.use_llm_scene_gen,
+            )
+        except Exception as e:
+            logger.exception(f"[/director/plan-and-render] job {job_id} failed")
+            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+
+    asyncio.create_task(_run())
 
     return {
         "job_id": job_id,
         "polling_url": f"/api/v1/director/jobs/{job_id}",
-        "estimated_duration_s": est_dur,
-        "estimated_cost_usd": est_cost,
-        "plan_id": _JOBS_STORE[job_id].get("plan_id"),
-        "mode": _JOBS_STORE[job_id].get("mode"),
+        "estimated_duration_s": pr.settings.duration_s,
+        "estimated_cost_usd": 0.0,  # unknown until plan() returns
+        "plan_id": None,
+        "mode": "plan_and_render",
     }
 
 

@@ -100,81 +100,65 @@ async def render_plan(
     """
     bible = plan.continuity_bible
     shots = plan.shot_list
-    ref_key, i2v_key = _resolve_models(user_model)
+    ref_key_default, i2v_key_default = _resolve_models(user_model)
 
     _update_job(jobs_store, job_id, status="rendering", progress=10,
                 current_step="scene_gen", scene_count=len(shots))
 
-    # Stage 1 — Scene Generation (build all N prompts)
-    # For shot[0] use ref-mode. For chained shots we will switch to i2v at runtime
-    # once we have the prior shot's last_frame_url.
-    model_keys: dict[str, str] = {}
-    for s in shots:
-        # if user picked specific model per shot
-        per_shot_user_model = s.model_routing.preferred_model
-        if per_shot_user_model and per_shot_user_model != "auto":
-            mk_ref, mk_i2v = _resolve_models(per_shot_user_model)
-        else:
-            mk_ref, mk_i2v = ref_key, i2v_key
-        # default to ref — will swap to i2v in chain loop
-        model_keys[s.shot_id] = mk_ref
-
-    scene_jobs = scene_generation_agent.generate_all_scenes(
-        bible=bible,
-        shots=shots,
-        reference_images=reference_images,
-        model_key_per_shot=model_keys,
-        last_frame_urls=None,  # filled at runtime
-        llm_mode=use_llm_scene_gen,
-    )
-    scene_jobs_by_id = {j.shot_id: j for j in scene_jobs}
-
-    # Stage 2 — Chain render
+    # Stage 1 — Reference-chained render loop.
+    # We invoke Scene Generation Agent LAZILY per shot (right before its render
+    # call) so the LLM sees the live `last_frame_url` and can format the prompt
+    # accordingly (chain frame carries identity → drop char refs etc.).
     work_dir = Path(tempfile.gettempdir()) / f"cineforge_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     last_frame_url: Optional[str] = None
     clip_paths: list[Path] = []
     chain_meta: list[dict] = []
+    total_shots = len(shots)
 
     for i, shot in enumerate(shots):
         _update_job(
             jobs_store, job_id,
             status="rendering",
-            progress=15 + int(70 * (i / max(1, len(shots)))),
-            current_step=f"shot_{i + 1}/{len(shots)}",
+            progress=15 + int(70 * (i / max(1, total_shots))),
+            current_step=f"shot_{i + 1}/{total_shots}",
         )
-        job = scene_jobs_by_id[shot.shot_id]
 
-        # Decide chain on the fly: if Bible+Shot says chain AND we actually have last_frame_url
-        should_chain = (
+        # Decide the model key for this shot. Honor per-shot override; otherwise
+        # use the user's choice; switch to i2v variant when chaining.
+        per_shot_user_model = shot.model_routing.preferred_model
+        if per_shot_user_model and per_shot_user_model != "auto":
+            ref_key, i2v_key = _resolve_models(per_shot_user_model)
+        else:
+            ref_key, i2v_key = ref_key_default, i2v_key_default
+
+        will_chain = (
             shot.continuity.previous_shot_id is not None
             and last_frame_url is not None
             and i > 0
         )
-        if should_chain:
-            # swap to i2v variant
-            user_m = (shot.model_routing.preferred_model
-                      if shot.model_routing.preferred_model and shot.model_routing.preferred_model != "auto"
-                      else user_model)
-            _, i2v_model_key = _resolve_models(user_m)
-            job.model_key = i2v_model_key
-            job.render_mode = "i2v_chain"
-            job.chain_input_url = last_frame_url
-            job.reference_image_urls = []  # chain frame already carries identity
+        active_model_key = i2v_key if will_chain else ref_key
 
-        # Resolution from caller / per-shot override
-        job.resolution = resolution
-
-        # not last → request last_frame
-        job.return_last_frame = (i < len(shots) - 1)
+        # Build the prompt via Layer 2 (LLM or deterministic).
+        job = await asyncio.to_thread(
+            scene_generation_agent.generate_scene,
+            bible=bible,
+            shot=shot,
+            model_key=active_model_key,
+            reference_images=reference_images,
+            last_frame_url=last_frame_url if will_chain else None,
+            llm_mode=use_llm_scene_gen,
+            resolution=resolution,
+            is_last_shot=(i == total_shots - 1),
+        )
 
         kwargs = job.to_atlas_kwargs()
         kwargs["poll_interval_s"] = 5
         kwargs["timeout_s"] = 600
 
         logger.info(
-            f"[VideoWorker V3] {job_id} shot {shot.shot_id} ({i + 1}/{len(shots)}) "
+            f"[VideoWorker V3] {job_id} shot {shot.shot_id} ({i + 1}/{total_shots}) "
             f"mode={job.render_mode} model={job.model_key} dur={job.duration_s}s "
             f"refs={len(job.reference_image_urls)}"
         )

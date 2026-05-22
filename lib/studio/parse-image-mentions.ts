@@ -13,7 +13,16 @@
  * Khi user XOÁ ảnh: strip "[Image N]" khỏi prompt + re-index N+1, N+2... → N, N+1.
  */
 
-import type { ReferenceRole } from './use-propose-job';
+// Local type — kept aligned with backend role taxonomy in `agent/schemas.py`.
+// (Previously imported from the V2 use-propose-job hook which has been removed.)
+export type ReferenceRole =
+  | 'primary_subject'
+  | 'secondary_subject'
+  | 'product_hero'
+  | 'product_detail'
+  | 'style_reference'
+  | 'environment'
+  | 'brand_asset';
 
 // Context-window keywords → role mapping (case-insensitive, VN + EN)
 // Order quan trọng: nếu nhiều match thì lấy weight cao nhất.

@@ -12,7 +12,16 @@
 
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
-import type { ContextInjection as ContextInjectionType } from '@/lib/studio/use-propose-job';
+
+// Local type — mirrors backend/api/routes/director.py ContextInjection schema.
+// Kept local so this component is not coupled to any specific data hook.
+export type ContextInjectionType = {
+  pain_points?: string;
+  real_reviews?: string;
+  usps?: string;
+  forbidden_to_say?: string;
+  mood_hint?: string;
+};
 
 interface Props {
   value: ContextInjectionType;

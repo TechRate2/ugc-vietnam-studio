@@ -226,35 +226,47 @@ Fire Seedream image gen cho từng storyboard frame. Returns updated DirectorPla
 
 ### `POST /api/v1/director/generate`
 
-Layer 3 render. Hai mode — chỉ pass MỘT trong hai field `plan` hoặc `plan_request`:
+Layer 3 — render an **approved** DirectorPlan (canonical Human-in-the-Loop path).
 
 ```jsonc
-// MODE A — Human-in-the-Loop (recommended): pass plan đã user approve
+// Request
 {
-  "plan": { ...full DirectorPlan, có thể đã edit... },
+  "plan": { ...full DirectorPlan từ POST /plan, có thể đã edit... },
   "reference_images": [ ... ],
-  "settings": { audio_mode, model, duration_s, aspect_ratio, resolution },
+  "settings": { "audio_mode": "...", "model": "...", "duration_s": 15, ... },
   "audio_plan": null,
   "use_llm_scene_gen": true
 }
 
-// MODE B — Auto plan-then-render (skip review): pass plan_request thay vì plan
-{
-  "plan_request": { ...same shape as POST /plan body... },
-  "settings": { ... },
-  "audio_plan": null,
-  "use_llm_scene_gen": true
-}
-
-// Response (both modes)
+// Response
 {
   "job_id": "job_xxxxx",
   "polling_url": "/api/v1/director/jobs/job_xxxxx",
   "estimated_duration_s": 15,
   "estimated_cost_usd": 1.48,
-  "plan_id": "dp_..."        // returned plan id (mode B will have a fresh one)
+  "plan_id": "dp_...",
+  "mode": "approved"
 }
 ```
+
+Flow: server runs `continuity_manager.validate_plan()` → if any hard error, 400.
+Soft warnings are kept on the job record and `sanitize_plan()` cleans bad refs.
+Then `video_worker.render_plan()` is dispatched in the background.
+
+### `POST /api/v1/director/plan-and-render`
+
+One-shot escape hatch — build a plan AND render it without Human-in-the-Loop review.
+Useful for automated batches / CLI jobs. Returns the same shape as `/generate`.
+
+```jsonc
+{
+  "plan_request": { ...same shape as POST /plan body... },
+  "audio_plan": null,
+  "use_llm_scene_gen": true
+}
+```
+
+Job state machine: `pending → planning → rendering → assembling → done`.
 
 ### `GET /api/v1/director/jobs/{job_id}` · `POST .../cancel`
 
@@ -265,6 +277,56 @@ Poll status. Field: `status` (`pending|rendering|assembling|done|failed|cancelle
 ## 6. Legacy endpoints (scheduled removal)
 
 `backend/api/routes/jobs.py` + `workers/render_pipeline.py` còn mount tại `/api/v1/jobs/*` để không phá tích hợp client cũ. Banner LEGACY rõ ràng trong source. Chỉ chấp nhận **Director-approved input** (`approved_shots` + `approved_character_sheet` required). Sẽ xoá sau khi mọi caller chuyển sang `/api/v1/director/generate`.
+
+---
+
+## 6.5. Scene Generation Agent (Layer 2)
+
+`backend/agent/scene_generation_agent.py` produces one `SceneRenderJob` per shot
+from the Continuity Bible. It is invoked **lazily per shot** by
+`workers/video_worker.py` while the chain walks — so the LLM sees the live
+`last_frame_url` and the active model key (ref vs i2v variant) for that step.
+
+```python
+job = generate_scene(
+    bible=plan.continuity_bible,
+    shot=plan.shot_list[i],
+    model_key="seedance_2_0_ref" or "seedance_2_0_i2v",
+    reference_images=all_uploaded_refs,
+    last_frame_url=prev_shot_last_frame or None,
+    llm_mode=True,                # 1 LLM call per shot (default)
+    resolution="720p",
+    is_last_shot=(i == len(shots) - 1),
+)
+atlas_client.generate_video(**job.to_atlas_kwargs())
+```
+
+Behaviour:
+
+1. **LLM call** against `system_prompts/scene.md`. Output validated by
+   `_SceneLLMOutput` Pydantic schema (prompt + negative_prompt + reference_image_indices
+   + render_mode + chain_input_url + model_params). On JSON parse fail or schema
+   mismatch, the call is retried ONCE with a lower temperature (0.55 → 0.35).
+   If both attempts fail, falls back silently to the deterministic builder.
+2. **Universal Reference binding** via `continuity_manager.references_for_shot()`.
+   On `i2v_chain` mode the agent filters out `character_anchor` / `product_*`
+   refs (chain frame already carries identity) and keeps only style / environment
+   / brand_asset refs — preventing double-binding drift.
+3. **Model-aware prompt format** via `MODEL_FORMAT_HINTS`:
+   `seedance_2_0_*` → `multi_shot_inline`; `seedance_v15_pro_i2v` → `time_coded`;
+   `wan_2_7_i2v` / `*_i2v` → `i2v_motion` (motion verbs only); `vidu_q3_*` →
+   `single_descriptive`.
+4. **Prompt length cap** per format — `multi_shot_inline` ≤ 1200 chars; others ≤
+   600–800. Overflow gets safely truncated with an ellipsis.
+5. **Negative prompt**: defaults to `continuity_manager.build_negative_prompt(bible)`
+   (must_avoid + brand_safety + quality negatives). LLM may supply a tighter
+   override.
+6. **`return_last_frame`** is automatically set to `False` on the last shot, so
+   we don't waste a frame extraction for the final clip.
+
+The deterministic builder (`llm_mode=False`) is a pure function — same Bible +
+Shot always produces the same prompt. Use it in cost-sensitive batches or for
+unit tests of the renderer chain.
 
 ---
 
