@@ -27,6 +27,8 @@ import {
   type ProgressEvent,
 } from '@/lib/studio/use-director-plan';
 import { useDirectorPlanEditor } from '@/lib/studio/use-director-plan-editor';
+import type { VideoSettings } from '@/lib/types/backend';
+import { RefineDrawer } from './RefineDrawer';
 
 interface Props {
   plan: DirectorPlan | null;
@@ -37,6 +39,16 @@ interface Props {
   onApprove: (planWithStoryboards: DirectorPlan) => void;
   onRetry?: () => void;
   onCancel?: () => void;
+  /** When set, enables per-shot "Refine" button on Shot List + Evaluation tabs.
+   *  Caller passes settings so RefineDrawer can submit to /director/refine. */
+  refine?: {
+    settings: VideoSettings;
+    /** Optional map shot_id → last_frame_url from the prior shot's original
+     *  render. RefineDrawer passes this so refined clip keeps chain continuity. */
+    lastFramesByShotId?: Record<string, string | null | undefined>;
+    /** Notified when a refine job completes successfully. */
+    onRefined?: (shotId: string, outputUrl: string) => void;
+  };
 }
 
 type TabKey = 'bible' | 'shots' | 'storyboard' | 'evaluation';
@@ -50,10 +62,15 @@ export function DirectorPlanTab({
   onApprove,
   onRetry,
   onCancel,
+  refine,
 }: Props) {
   const [tab, setTab] = useState<TabKey>('bible');
   const [genStoryboard, setGenStoryboard] = useState(false);
   const [storyboardOverlay, setStoryboardOverlay] = useState<DirectorPlan | null>(null);
+  // V3 §3.5 — per-shot refine drawer state
+  const [refineShotId, setRefineShotId] = useState<string | null>(null);
+  // Track refined clips so the UI can show "Refined" badge after job done.
+  const [refinedOutputs, setRefinedOutputs] = useState<Record<string, string>>({});
 
   // V3 HitL inline edit — local mutable plan with dirty tracking.
   // Storyboard generation results take precedence (server-returned plan with
@@ -166,7 +183,9 @@ export function DirectorPlanTab({
             shots={shot_list}
             referenceCount={referenceImages.length}
             dirtyShots={editor.dirtyShots}
+            refinedOutputs={refinedOutputs}
             onShotEdit={editor.updateShot}
+            onRefine={refine ? (shotId) => setRefineShotId(shotId) : undefined}
           />
         )}
         {tab === 'storyboard' && (
@@ -176,8 +195,37 @@ export function DirectorPlanTab({
             isGenerating={genStoryboard}
           />
         )}
-        {tab === 'evaluation' && <EvaluationView report={evaluation} />}
+        {tab === 'evaluation' && (
+          <EvaluationView
+            report={evaluation}
+            shotIds={shot_list.map((s) => s.shot_id)}
+            onQuickRefine={refine ? (shotId) => { setTab('shots'); setRefineShotId(shotId); } : undefined}
+          />
+        )}
       </div>
+
+      {/* Per-shot Refine Drawer */}
+      {refine && refineShotId && effectivePlan && (
+        <RefineDrawer
+          open={true}
+          plan={effectivePlan}
+          shotId={refineShotId}
+          referenceImages={referenceImages}
+          settings={refine.settings}
+          previousLastFrameUrl={
+            (() => {
+              const target = effectivePlan.shot_list.find((s) => s.shot_id === refineShotId);
+              const prevId = target?.continuity.previous_shot_id;
+              return prevId ? (refine.lastFramesByShotId?.[prevId] ?? null) : null;
+            })()
+          }
+          onClose={() => setRefineShotId(null)}
+          onRefined={(shotId, outputUrl) => {
+            setRefinedOutputs((prev) => ({ ...prev, [shotId]: outputUrl }));
+            refine.onRefined?.(shotId, outputUrl);
+          }}
+        />
+      )}
 
       {/* Footer CTA */}
       <div className="border-t border-border px-5 py-3 flex items-center justify-between gap-3">
@@ -372,21 +420,24 @@ function BibleView({
 }
 
 function ShotListView({
-  shots, referenceCount, dirtyShots, onShotEdit,
+  shots, referenceCount, dirtyShots, refinedOutputs, onShotEdit, onRefine,
 }: {
   shots: Shot[];
   referenceCount: number;
   dirtyShots: Set<string>;
+  refinedOutputs: Record<string, string>;
   onShotEdit: (shotId: string, edits: import('@/lib/studio/use-director-plan-editor').ShotEdits) => void;
+  onRefine?: (shotId: string) => void;
 }) {
   return (
     <div className="space-y-3">
       <div className="text-xs text-text-subtle flex items-center justify-between">
         <span>{shots.length} shots · {shots.reduce((s, x) => s + x.duration_s, 0)}s total</span>
-        <span className="text-text-subtle">Click vào field để chỉnh</span>
+        <span className="text-text-subtle">Click vào field để chỉnh{onRefine ? ' · 🪄 = refine 1 shot' : ''}</span>
       </div>
       {shots.map((s) => {
         const isDirty = dirtyShots.has(s.shot_id);
+        const wasRefined = !!refinedOutputs[s.shot_id];
         return (
           <div
             key={s.shot_id}
@@ -408,6 +459,11 @@ function ShotListView({
                     ● đã chỉnh
                   </span>
                 )}
+                {wasRefined && (
+                  <span className="text-emerald-300 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10">
+                    ✓ refined
+                  </span>
+                )}
               </div>
               <div className="text-text-subtle font-mono flex items-center gap-2">
                 {s.start_s.toFixed(1)}–{s.end_s.toFixed(1)}s
@@ -421,6 +477,15 @@ function ShotListView({
                   title="Duration (s) — clamp 2-20"
                 />
                 <span>s</span>
+                {onRefine && (
+                  <button
+                    onClick={() => onRefine(s.shot_id)}
+                    className="ml-1 p-1 rounded text-amber-300 hover:text-amber-200 hover:bg-amber-500/10 transition"
+                    title="Refine — re-render only this shot"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -551,7 +616,13 @@ function StoryboardView({
   );
 }
 
-function EvaluationView({ report }: { report: DirectorPlan['evaluation'] }) {
+function EvaluationView({
+  report, shotIds, onQuickRefine,
+}: {
+  report: DirectorPlan['evaluation'];
+  shotIds: string[];
+  onQuickRefine?: (shotId: string) => void;
+}) {
   const scores = [
     { label: 'Consistency', value: report.consistency_score },
     { label: 'Viral potential', value: report.viral_potential_score },
@@ -559,6 +630,17 @@ function EvaluationView({ report }: { report: DirectorPlan['evaluation'] }) {
     { label: 'Pacing', value: report.pacing_score },
     { label: 'Brand safety', value: report.brand_safety_score },
   ];
+
+  // Heuristic — extract first shot_id mentioned in a suggestion string.
+  // Director system prompt is encouraged to write suggestions like
+  // "tighten S1 to 2s" or "shot S3 lighting contradicts bible.visual_style".
+  const extractShotId = (text: string): string | null => {
+    for (const id of shotIds) {
+      const re = new RegExp(`\\b${id}\\b`, 'i');
+      if (re.test(text)) return id;
+    }
+    return null;
+  };
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-brand-500/30 bg-gradient-to-br from-brand-500/10 to-fuchsia-500/10 px-4 py-3">
@@ -601,8 +683,26 @@ function EvaluationView({ report }: { report: DirectorPlan['evaluation'] }) {
       )}
       {report.suggestions.length > 0 && (
         <Section title="Suggestions">
-          <ul className="text-xs text-amber-200/90 list-disc pl-5 space-y-1">
-            {report.suggestions.map((r, i) => <li key={i}>{r}</li>)}
+          <ul className="text-xs text-amber-200/90 space-y-1.5 list-none">
+            {report.suggestions.map((r, i) => {
+              const targetShotId = extractShotId(r);
+              return (
+                <li key={i} className="flex items-start gap-2">
+                  <span className="text-amber-400 leading-none mt-1.5">•</span>
+                  <div className="flex-1">
+                    <span>{r}</span>
+                    {targetShotId && onQuickRefine && (
+                      <button
+                        onClick={() => onQuickRefine(targetShotId)}
+                        className="ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition"
+                      >
+                        <Wand2 className="w-2.5 h-2.5" /> Refine {targetShotId}
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </Section>
       )}

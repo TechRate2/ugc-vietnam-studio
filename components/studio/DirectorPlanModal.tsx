@@ -98,6 +98,14 @@ export function DirectorPlanModal({
             onApprove={handleApprove}
             onRetry={handleRetry}
             onCancel={onClose}
+            // V3 §3.5 Refine — enable per-shot refine drawer + quick-refine from Evaluation
+            // suggestions. Modal is opened DURING the pre-render review here, so the
+            // shotId → last_frame_url map starts empty; once the user runs the first
+            // render, StudioMain can pipe `chain.last_frame_url`s back via this prop.
+            refine={{
+              settings,
+              lastFramesByShotId: {},
+            }}
           />
         </div>
       </div>
