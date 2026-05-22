@@ -111,6 +111,28 @@ def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int =
     return warnings
 
 
+def validate_plan_against_model(plan: DirectorPlan, user_model: str) -> list[str]:
+    """Check every shot against the chosen model's hard capability limits.
+
+    Returns a list of human-readable violations (empty = compatible). Called by
+    `/director/generate` BEFORE dispatching render — so the API can return 400
+    with actionable suggestions instead of failing midway through the render.
+
+    Example violations:
+        "S3.duration_s=7 không hợp lệ — model wan_2_7 chỉ chấp nhận discrete [5, 10]s"
+        "S2.reference_indices có 5 refs nhưng vidu_q3 max 4"
+    """
+    from agent.model_capabilities import capabilities_for, validate_shot_against_model
+
+    cap = capabilities_for(user_model)
+    out: list[str] = []
+    for s in plan.shot_list:
+        violations = validate_shot_against_model(s.model_dump(), cap)
+        for v in violations:
+            out.append(f"{s.shot_id}: {v}")
+    return out
+
+
 def sanitize_plan(plan: DirectorPlan) -> DirectorPlan:
     """Silently drop invalid `reference_indices` and clamp `apply_to_shots`.
 

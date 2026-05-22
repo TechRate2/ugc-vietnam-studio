@@ -485,6 +485,14 @@ class DirectorAgent:
         niche_hint: Optional[str],
         ref_hints: list[dict],
     ) -> dict:
+        # V3.1 — inject model capability summary so the Director plans within
+        # the chosen model's hard constraints (max refs, discrete durations,
+        # audio mode, image-tag support, etc.).
+        from agent.model_capabilities import summary_for_director_prompt
+        tc = dict(tech_config)
+        tc["model_capability_notes"] = summary_for_director_prompt(
+            tc.get("model", "auto")
+        )
         return {
             "product_input": product_input,
             "reference_images": reference_images,
@@ -492,7 +500,7 @@ class DirectorAgent:
             "reference_videos": reference_videos,
             "user_brief": user_brief,
             "context_injection": context_injection,
-            "tech_config": tech_config,
+            "tech_config": tc,
             "niche_hint": niche_hint or "auto",
         }
 

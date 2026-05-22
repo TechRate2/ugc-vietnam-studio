@@ -357,6 +357,19 @@ async def generate_video(request: GenerateRequest):
     except continuity_manager.ContinuityError as e:
         raise HTTPException(400, f"Plan rejected by Continuity Manager: {e}") from e
 
+    # V3.1 — also validate the plan against the chosen model's hard limits
+    # (max refs, discrete durations, etc.). Treat as warnings, but surface them
+    # to the user so they can hit "Refine" before burning credits.
+    model_violations = continuity_manager.validate_plan_against_model(
+        request.plan, user_model=request.settings.model,
+    )
+    if model_violations:
+        warnings.extend(model_violations)
+        logger.warning(
+            f"[/director/generate] {request.plan.plan_id} model-fit violations: "
+            f"{model_violations[:5]}"
+        )
+
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     _JOBS_STORE[job_id] = {
         "status": "pending",

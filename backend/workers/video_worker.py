@@ -52,8 +52,14 @@ USER_MODEL_TO_ATLAS_REF: dict[str, str] = {
     "seedance_2_0_fast": "seedance_2_0_fast_ref",
 }
 USER_MODEL_TO_ATLAS_I2V: dict[str, str] = {
-    "vidu_q3": "wan_2_7_i2v",                  # vidu has no native i2v — fallback wan
-    "vidu_q3_mix": "wan_2_7_i2v",
+    # NOTE on Vidu chaining: Vidu Q3 has NO native i2v endpoint. The earlier
+    # fallback to wan_2_7_i2v caused cross-family identity drift (Wan re-styles
+    # the frame). The correct pattern is to STAY in the Vidu family and feed
+    # the previous shot's last frame as an additional entry in the `images`
+    # array of vidu_q3_ref — Vidu treats it as a strong style anchor. This is
+    # what V3.1 does.
+    "vidu_q3": "vidu_q3_ref",
+    "vidu_q3_mix": "vidu_q3_mix_ref",
     "wan_2_7": "wan_2_7_i2v",
     "seedance_1_5_pro": "seedance_v15_pro_i2v",
     "seedance_2_0": "seedance_2_0_i2v",

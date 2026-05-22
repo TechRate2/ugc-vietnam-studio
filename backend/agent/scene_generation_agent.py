@@ -200,9 +200,16 @@ def generate_scene(
         else ("ref_to_video" if ref_urls else "t2v")
     )
 
-    # ---- Audio decision (from Bible.audio_design) ---------------------------
+    # ---- Audio decision (from Bible.audio_design × model capability) --------
+    # Only set `generate_audio=true` for models with NATIVE audio support.
+    # Wan 2.7 uses driven audio via the `audio` field — do not set
+    # `generate_audio` for it (the AtlasCloud payload would be ignored at best).
+    from agent.model_specs import VIDEO_MODEL_SPECS as _SPECS
+    _model_spec = _SPECS.get(model_key) or {}
+    _audio_cap = _model_spec.get("audio_capability", "none")
     dialogue_style = (bible.audio_design.dialogue_style or "silent").lower()
-    generate_audio = dialogue_style not in ("silent", "")
+    wants_audio = dialogue_style not in ("silent", "")
+    generate_audio = wants_audio and (_audio_cap == "native")
 
     # ---- Negative prompt baseline (deterministic) ----------------------------
     negative = continuity_manager.build_negative_prompt(bible)
