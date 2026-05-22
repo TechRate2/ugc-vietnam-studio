@@ -1,0 +1,152 @@
+{
+  "finalScore": 98.85096153846155,
+  "scores": {
+    "modelCount": {
+      "hub": 208,
+      "atlas": 208,
+      "pct": 100
+    },
+    "schema": {
+      "fileCount": 208,
+      "total": 208,
+      "sampleIdentical": 20,
+      "sampleSize": 20,
+      "pct": 100,
+      "identicalPct": 100
+    },
+    "example": {
+      "fileCount": 208,
+      "valid": 208,
+      "withOutputs": 198,
+      "total": 208,
+      "pct": 100,
+      "validPct": 100,
+      "withOutputPct": 95.1923076923077
+    },
+    "readme": {
+      "fileCount": 208,
+      "withContent": 207,
+      "total": 208,
+      "pct": 100
+    },
+    "assets": {
+      "covers": {
+        "count": 208,
+        "total": 208,
+        "pct": 100
+      },
+      "samples": {
+        "count": 195,
+        "total": 208,
+        "pct": 93.75
+      },
+      "staticVideos": 372,
+      "staticImages": 433
+    },
+    "ui": {
+      "components": {
+        "ok": 4,
+        "total": 4,
+        "pct": 100
+      },
+      "features": {
+        "ok": 14,
+        "total": 14,
+        "pct": 100
+      },
+      "detail": {
+        "PromptEditor (contenteditable)": true,
+        "ImagePool (action bar)": true,
+        "DropZone video+audio": true,
+        "AtlasSelect combobox": true,
+        "AtlasSwitch toggle": true,
+        "AtlasNumberSlider": true,
+        "Pricing calculator": true,
+        "API tab 9 panes": true,
+        "Copy for AI button": true,
+        "7 language code gen": true,
+        "View toggle (Biểu mẫu/JSON)": true,
+        "Reference media autoload": true,
+        "Markdown render + TOC": true,
+        "4-tier output fallback": true
+      }
+    },
+    "routes": {
+      "ok": 9,
+      "total": 10,
+      "pct": 90
+    },
+    "preview": {
+      "ok": 208,
+      "total": 208,
+      "pct": 100
+    }
+  },
+  "dims": [
+    {
+      "name": "Model count",
+      "weight": 10,
+      "pct": 100
+    },
+    {
+      "name": "Schema files",
+      "weight": 10,
+      "pct": 100
+    },
+    {
+      "name": "Schema identical (live check, 20 sample)",
+      "weight": 8,
+      "pct": 100
+    },
+    {
+      "name": "Example files",
+      "weight": 10,
+      "pct": 100
+    },
+    {
+      "name": "Example valid JSON",
+      "weight": 7,
+      "pct": 100
+    },
+    {
+      "name": "Example has output URLs",
+      "weight": 7,
+      "pct": 95.1923076923077
+    },
+    {
+      "name": "README files",
+      "weight": 8,
+      "pct": 100
+    },
+    {
+      "name": "Cover thumbnails",
+      "weight": 5,
+      "pct": 100
+    },
+    {
+      "name": "Sample preview videos",
+      "weight": 5,
+      "pct": 93.75
+    },
+    {
+      "name": "UI components (5 atlas-form)",
+      "weight": 10,
+      "pct": 100
+    },
+    {
+      "name": "UI features (14 critical)",
+      "weight": 10,
+      "pct": 100
+    },
+    {
+      "name": "HTTP routes 200 OK (10 sample)",
+      "weight": 5,
+      "pct": 90
+    },
+    {
+      "name": "Output preview coverage",
+      "weight": 5,
+      "pct": 100
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "stats": {
+    "totalModels": 208,
+    "fieldCheck": {
+      "slug": 208,
+      "name": 208,
+      "vendor": 208,
+      "category": 208,
+      "modalities": 208,
+      "description": 208,
+      "pricing": 208,
+      "accent": 208,
+      "atlasKey": 208,
+      "sampleMedia": 195,
+      "demoMedia": 208,
+      "isFeatured": 208,
+      "isNew": 208,
+      "capabilities": 208,
+      "tags": 208
+    },
+    "fileCheck": {
+      "schemaExists": 208,
+      "exampleExists": 208,
+      "readmeExists": 208,
+      "coverExists": 208,
+      "sampleExists": 195
+    },
+    "dataValid": {
+      "schemaHasInput": 208,
+      "exampleHasExamples": 199,
+      "exampleHasInputs": 199,
+      "exampleHasOutputs": 198,
+      "readmeHasContent": 208,
+      "schemaHasResponse": 207
+    },
+    "byCategory": {
+      "video": 143,
+      "image": 65
+    },
+    "byVendor": {
+      "Qwen": 44,
+      "Other": 8,
+      "Independent": 3,
+      "ByteDance": 37,
+      "Google": 21,
+      "Vidu": 27,
+      "Atlas Cloud": 7,
+      "Kuaishou": 35,
+      "OpenAI": 6,
+      "Tongyi Mai": 1,
+      "MiniMax": 12,
+      "xAI": 2,
+      "Black Forest Labs": 5
+    }
+  },
+  "issues": {
+    "critical": [],
+    "warning": [
+      "kwaivgi-kling-effects: output file missing → 1.mp4",
+      "vidu-reference-to-video-q1: example.json has no examples[]",
+      "vidu-reference-to-video-2-0: example.json has no examples[]",
+      "vidu-start-end-to-video-2-0: example.json has no examples[]",
+      "kwaivgi-kling-v2-0-t2v-master: example.json has no examples[]",
+      "vidu-image-to-video-2-0: example.json has no examples[]",
+      "bytedance-seedance-v1-lite-i2v-720p: output file missing → 02176709478540100000000000000000000ffffac19188d29cf40.mp4",
+      "vidu-q2-pro-start-end-to-video: example.json has no examples[]",
+      "vidu-q2-turbo-start-end-to-video: example.json has no examples[]",
+      "vidu-q1-reference-to-video: example.json has no examples[]",
+      "vidu-q1-start-end-to-video: example.json has no examples[]"
+    ]
+  }
+}

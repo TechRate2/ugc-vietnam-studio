@@ -1,0 +1,76 @@
+{
+  "id": "S1_unboxing_handcam",
+  "name_vn": "Mở hộp sản phẩm POV",
+  "name_en": "Hand-cam Unboxing",
+  "category": "ASMR",
+  "tier": "S",
+  "default_duration_s": 25,
+  "min_duration_s": 15,
+  "max_duration_s": 60,
+  "aspect_ratio": "9:16",
+  "audio_mode_default": "silent_native",
+  "scenes": [
+    {
+      "index": 0,
+      "act_name": "REVEAL",
+      "duration_s": 4,
+      "emotion_beat": "anticipation",
+      "shot_pattern": "top-down POV hands holding sealed package",
+      "camera_move": "static handheld, slight macro tilt",
+      "lighting": "warm afternoon golden window light from upper-left",
+      "slots_needed": ["persona.hands", "product.delivery_package"],
+      "audio_focus": ["cardboard rustling", "ambient room tone"]
+    },
+    {
+      "index": 1,
+      "act_name": "OPEN",
+      "duration_s": 5,
+      "emotion_beat": "build anticipation",
+      "shot_pattern": "macro close-up scissors cutting tape, opening box",
+      "camera_move": "slow dolly in to reveal moment",
+      "lighting": "consistent with previous scene",
+      "slots_needed": ["product.image"],
+      "audio_focus": ["scissors snip", "tape ripping crisp", "box opening soft thud"]
+    },
+    {
+      "index": 2,
+      "act_name": "SHOWCASE",
+      "duration_s": 7,
+      "emotion_beat": "discovery satisfaction",
+      "shot_pattern": "hands rotate product 360, macro detail of key features",
+      "camera_move": "rack focus from one feature to another",
+      "lighting": "soft product shot quality",
+      "slots_needed": ["product.image", "product.key_features"],
+      "audio_focus": ["fabric texture", "leather creak", "material rubbing"]
+    },
+    {
+      "index": 3,
+      "act_name": "PLACE",
+      "duration_s": 4,
+      "emotion_beat": "calm conclusion",
+      "shot_pattern": "hands place product gently on desk with aesthetic prop",
+      "camera_move": "static top-down final composition",
+      "lighting": "warm closing tone",
+      "slots_needed": ["product.image"],
+      "audio_focus": ["soft thud product placed", "ambient room tone"]
+    }
+  ],
+  "global_constraints": [
+    "no face visible",
+    "no mouth movement",
+    "no talking",
+    "no multiple packages",
+    "no harsh studio lighting",
+    "ONE package centered focus"
+  ],
+  "model_recommendations": {
+    "vidu_q3": {"rating": "excellent", "cost_per_25s": 1.05},
+    "seedance_1_5_pro": {"rating": "excellent", "cost_per_25s": 1.18},
+    "seedance_2_0": {"rating": "premium", "cost_per_25s": 2.40}
+  },
+  "use_cases_vn": [
+    "Affiliate Shopee/Lazada unboxing balo/giày/phụ kiện",
+    "PR haul beauty/fashion aesthetic",
+    "Aesthetic faceless TikTok #SilentUnboxing"
+  ]
+}

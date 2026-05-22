@@ -1,0 +1,402 @@
+'use client';
+import { useState, useMemo } from 'react';
+import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon } from 'lucide-react';
+import { GenerateFormats, type FormatCard } from './GenerateFormats';
+import { JobResultModal } from './JobResultModal';
+import { VideoAgentCard } from './VideoAgentCard';
+import { ContextInjection } from './ContextInjection';
+import { AdvancedPanel } from './AdvancedPanel';
+import { SceneEditorModal } from './SceneEditorModal';
+import { useGenerateJob } from '@/lib/studio/use-generate-job';
+import {
+  useProposeJob,
+  type ContextInjection as ContextInjectionType,
+  type NicheHint,
+} from '@/lib/studio/use-propose-job';
+import { parseRoleHints } from '@/lib/studio/parse-image-mentions';
+import type { ApprovedScene } from '@/lib/studio/use-scene-editor';
+import { getModelConfig } from '@/lib/studio/model-config';
+import type { VideoModel, AspectRatio, AudioMode } from '@/lib/types/backend';
+import PRESETS from '@/lib/studio-presets.json';
+
+const INSPIRATION_CARDS: FormatCard[] = (PRESETS as any[]).map((p) => ({
+  id: p.id,
+  label: p.name || p.label,
+  video: p.video,
+  cost: 60.5,
+  chips: [],
+  headerLabel: '',
+  body: p.prompt?.slice(0, 200) || '',
+  productImg: p.productImg,
+  avatarImg: p.avatarImgs?.[0]?.img || null,
+}));
+
+// Resolution loose string — per-model options từ model_config.resolution_options
+// (KHÔNG hardcode Literal vì mỗi model AtlasCloud có set khác: vidu_q3 dùng 540p/720p/1080p,
+//  wan_2_7 dùng 720P/1080P uppercase, seedance_2_0 có 720p-SR/1080p-SR variants)
+type Resolution = string;
+
+export function StudioMain() {
+  // ============ STATE — Compact like Topview ============
+  // Product input (link/text/img)
+  const [productUrl, setProductUrl] = useState('');
+  const [productImg, setProductImg] = useState<string | null>(null);
+
+  // Main prompt textarea (idea + product description)
+  const [prompt, setPrompt] = useState('');
+
+  // References (1-12 depend on model, UI cap 5)
+  const [referenceImages, setReferenceImages] = useState<string[]>([]);
+
+  // Settings — init resolution theo default của model
+  const [model, setModel] = useState<VideoModel>('seedance_2_0');
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
+  const [resolution, setResolution] = useState<Resolution>(
+    getModelConfig('seedance_2_0').resolution_default,
+  );
+  const [durationS, setDurationS] = useState(15);
+  const [audioMode, setAudioMode] = useState<AudioMode>('silent_native');
+  // V3.1 — num_shots override (null = Director tự quyết, 1-5 = user ép)
+  const [numShots, setNumShots] = useState<number | null>(null);
+
+  // Director Agent (Phase 2 — Propose)
+  const [context, setContext] = useState<ContextInjectionType>({});
+  const [referenceVideos, setReferenceVideos] = useState<string[]>([]);
+  const [nicheHint, setNicheHint] = useState<NicheHint>('auto');
+  const {
+    propose,
+    proposal,
+    progress: proposeProgress,
+    isLoading: isProposing,
+    error: proposeError,
+    reset: resetPropose,
+  } = useProposeJob();
+  const [showSceneEditor, setShowSceneEditor] = useState(false);
+
+  // Render Job (Phase 3 — chạy sau khi user approve proposal)
+  const { createJob, jobStatus, isGenerating, error, reset, cancelJob } = useGenerateJob();
+  const [showResultModal, setShowResultModal] = useState(false);
+
+  // Computed
+  const modelConfig = getModelConfig(model);
+  const { costVnd, costCredits } = useMemo(() => {
+    const videoCostUsd = modelConfig.cost_per_second_usd * durationS;
+    const claudeCostUsd = 0.087;
+    const audioCostUsd = audioMode === 'dialogue_vo' ? 0.01 : 0.1;
+    const totalUsd = videoCostUsd + claudeCostUsd + audioCostUsd;
+    return {
+      costVnd: Math.round(totalUsd * 24500),
+      costCredits: parseFloat((totalUsd * 5).toFixed(1)), // 1 USD ≈ 5 credits
+    };
+  }, [modelConfig, durationS, audioMode]);
+
+  const canSubmit = !!(prompt.trim() || productUrl || productImg);
+
+  // Model change → auto adjust limits + reset resolution nếu không hợp lệ
+  const handleModelChange = (newModel: VideoModel) => {
+    setModel(newModel);
+    const newConfig = getModelConfig(newModel);
+    if (durationS > newConfig.max_duration_s) {
+      setDurationS(newConfig.max_duration_s);
+    }
+    if (referenceImages.length > newConfig.max_references) {
+      setReferenceImages(referenceImages.slice(0, newConfig.max_references));
+    }
+    // Auto-reset resolution nếu giá trị hiện tại không có trong options model mới
+    if (!newConfig.resolution_options.includes(resolution)) {
+      setResolution(newConfig.resolution_default);
+    }
+  };
+
+  // Phase 2 — Submit → Director Agent đề xuất (KHÔNG render thẳng)
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setShowSceneEditor(true);
+
+    // Parse [Image N] mentions trong prompt → role hints auto-detect cho VisualPlanner
+    const { role_hints } = parseRoleHints(prompt, referenceImages.length);
+
+    try {
+      await propose({
+        product_input: {
+          url: productUrl || undefined,
+          text_description: prompt || undefined,
+          image_urls: productImg ? [productImg] : [],
+        },
+        reference_images: referenceImages,
+        reference_role_hints: role_hints,
+        reference_videos: referenceVideos,
+        user_brief: prompt,
+        context_injection: context,
+        settings: {
+          audio_mode: audioMode,
+          model,
+          duration_s: durationS,
+          aspect_ratio: aspectRatio,
+          resolution,
+          num_shots: numShots ?? undefined,
+        },
+        niche_hint: nicheHint,
+      });
+    } catch {
+      // error đã được capture trong useProposeJob — modal sẽ render ErrorState
+    }
+  };
+
+  // Phase 3 — User click "Start Generation" trong SceneEditorModal → render queue
+  // Mỗi scene = 1 shot riêng, backend smart logic: merge (≤ max_dur) / extend chain (> max_dur) / concat
+  const handleStartGeneration = async (
+    scenes: ApprovedScene[],
+    approvedKeyframes?: any[],  // NEW v3: Phase 2.5 storyboard keyframes optional
+  ) => {
+    setShowSceneEditor(false);
+    setShowResultModal(true);
+
+    // Total duration từ scenes user edit (override durationS UI)
+    const totalDuration = scenes.reduce((sum, s) => sum + s.duration_s, 0);
+
+    await createJob({
+      product_input: {
+        url: productUrl || undefined,
+        text_description: prompt || undefined,
+        image_urls: productImg ? [productImg] : [],
+      },
+      reference_images: referenceImages,
+      settings: {
+        audio_mode: audioMode,
+        model,
+        duration_s: totalDuration || durationS,
+        aspect_ratio: aspectRatio,
+        resolution,
+      },
+      // Phase 2 → Phase 3 wire — TopView V2 Multi-Scene pattern
+      proposal_id: proposal?.proposal_id,
+      approved_scenes: scenes,
+      reference_mapping: proposal?.reference_mapping,
+      // V3 Model-Aware — pass cinematic shots + character_sheet để backend
+      // dispatch qua strategy.build_prompt() thay vì LLM generator
+      approved_shots: proposal?.shots,
+      approved_character_sheet: proposal?.character_sheet,
+      // NEW v3 — Phase 2.5 keyframes (optional) — backend i2v render path identity 100%
+      approved_keyframes: approvedKeyframes && approvedKeyframes.length ? approvedKeyframes : undefined,
+    } as any);
+  };
+
+  const handleSceneEditorClose = () => {
+    setShowSceneEditor(false);
+    resetPropose();
+  };
+
+  const handleCloseModal = () => {
+    setShowResultModal(false);
+    if (jobStatus?.status === 'done' || jobStatus?.status === 'failed') {
+      reset();
+    }
+  };
+
+  const handleUploadProduct = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'image/*';
+    inp.onchange = () => {
+      const f = inp.files?.[0];
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => setProductImg(r.result as string);
+      r.readAsDataURL(f);
+    };
+    inp.click();
+  };
+
+  return (
+    <main className="flex-1 overflow-y-auto relative">
+      {/* Background — đồng bộ homepage palette */}
+      <div className="absolute inset-0 bg-gradient-to-b from-bg via-bg-soft to-bg pointer-events-none" />
+      <div
+        className="absolute inset-0 pointer-events-none opacity-25"
+        style={{
+          backgroundImage:
+            'linear-gradient(rgba(124,77,255,0.10) 1px, transparent 1px), linear-gradient(90deg, rgba(124,77,255,0.10) 1px, transparent 1px)',
+          backgroundSize: '60px 60px',
+          maskImage: 'radial-gradient(ellipse at center top, rgba(0,0,0,1) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)',
+          WebkitMaskImage: 'radial-gradient(ellipse at center top, rgba(0,0,0,1) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)',
+        }}
+      />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-brand-600/20 rounded-full blur-[150px] pointer-events-none" />
+      <div className="absolute top-32 right-1/4 w-[400px] h-[400px] bg-rose-500/10 rounded-full blur-[120px] pointer-events-none" />
+
+      {/* Top right */}
+      <div className="absolute top-4 right-6 z-20 flex items-center gap-2">
+        <a
+          href="/pricing"
+          className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition"
+        >
+          <Diamond className="w-3.5 h-3.5 text-brand-300" /> Pricing
+          <span className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-md bg-gradient-to-r from-amber-500 to-rose-500 text-white text-[9px] font-bold">
+            30% OFF
+          </span>
+        </a>
+        <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition">
+          <FolderArchive className="w-3.5 h-3.5 text-emerald-300" /> Assets
+        </button>
+        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-fuchsia-500 border-2 border-border" />
+      </div>
+
+      <div className="relative px-6 lg:px-12 pt-16 pb-12 max-w-4xl mx-auto">
+        {/* HERO */}
+        <div className="text-center mb-8">
+          <div className="text-amber-400 text-[11px] uppercase tracking-[0.3em] font-medium mb-3 flex items-center justify-center gap-2">
+            <span className="relative flex w-1.5 h-1.5">
+              <span className="absolute inset-0 rounded-full bg-amber-400 animate-ping opacity-75" />
+              <span className="relative w-1.5 h-1.5 rounded-full bg-amber-400" />
+            </span>
+            Marketing Studio
+          </div>
+          <h1 className="text-3xl lg:text-5xl font-bold tracking-tight leading-[1.1]">
+            Biến mọi sản phẩm thành{' '}
+            <span className="bg-gradient-to-r from-brand-300 via-fuchsia-400 to-amber-300 bg-clip-text text-transparent animate-gradient-shift inline-block">
+              video ad
+            </span>
+          </h1>
+        </div>
+
+        {/* ADVANCED PANEL — compact 2-col grid (gọn hơn — TopView V2 style) */}
+        {/* Default ẨN. User click "Advanced ▼" để expand. Layout 2-col cho desktop, 1-col mobile */}
+        <AdvancedPanel
+          filledCount={
+            (productUrl ? 1 : 0) +
+            (productImg ? 1 : 0) +
+            (nicheHint !== 'auto' ? 1 : 0) +
+            (referenceVideos.length > 0 ? 1 : 0) +
+            (context.pain_points || context.real_reviews || context.usps ? 1 : 0)
+          }
+        >
+          {/* Row 1 — 2-col: Niche dropdown | Reference video URL */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+            <label className="flex items-center gap-2">
+              <span className="text-text-muted shrink-0 w-16">🎯 Niche</span>
+              <select
+                value={nicheHint}
+                onChange={(e) => setNicheHint(e.target.value as NicheHint)}
+                className="flex-1 bg-bg-soft border border-border rounded-md px-2 py-1.5 text-xs text-text hover:border-brand-500 focus:outline-none focus:border-brand-500 cursor-pointer"
+              >
+                <option value="auto">🤖 Auto-detect</option>
+                <option value="beauty_skincare">💄 Beauty & Skincare</option>
+                <option value="shopee_general">🛒 Shopee General</option>
+                <option value="supplement_health">💊 Supplement & Health</option>
+                <option value="tech_gadget">⚡ Tech & Gadget</option>
+                <option value="fashion_apparel">👗 Fashion & Apparel</option>
+                <option value="food_beverage">🍜 Food & Beverage</option>
+                <option value="custom">🎨 Custom</option>
+              </select>
+            </label>
+
+            <label className="flex items-center gap-2">
+              <span className="text-text-muted shrink-0 w-16">🎬 Clone</span>
+              <input
+                type="text"
+                value={referenceVideos[0] || ''}
+                onChange={(e) => setReferenceVideos(e.target.value ? [e.target.value] : [])}
+                placeholder="URL TikTok/Reel viral (optional)"
+                className="flex-1 bg-bg-soft border border-border rounded-md px-2 py-1.5 text-xs text-text hover:border-brand-500 focus:outline-none focus:border-brand-500 placeholder:text-text-subtle"
+              />
+            </label>
+          </div>
+
+          {/* Row 2 — Product link + image upload (compact) */}
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-text-muted shrink-0 w-16">🔗 Sản phẩm</span>
+            <div className="relative flex-1">
+              <Link2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-text-subtle" />
+              <input
+                value={productUrl}
+                onChange={(e) => setProductUrl(e.target.value)}
+                placeholder="URL Shopee / Lazada / Tiki (optional)"
+                className="w-full pl-7 pr-2 py-1.5 text-xs bg-bg-soft border border-border rounded-md text-text hover:border-brand-500 focus:outline-none focus:border-brand-500 placeholder:text-text-subtle"
+              />
+            </div>
+            <button
+              onClick={handleUploadProduct}
+              className="shrink-0 w-8 h-8 rounded-md border border-border bg-bg-soft hover:bg-bg-hover hover:border-brand-600/50 transition flex items-center justify-center text-text-subtle hover:text-text"
+              title="Upload ảnh sản phẩm"
+            >
+              {productImg ? (
+                <img src={productImg} alt="" className="w-full h-full object-cover rounded-md" />
+              ) : (
+                <ImgIcon className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+
+          {/* Row 3 — Context Injection (giữ collapse riêng vì 5 field dài) */}
+          <ContextInjection value={context} onChange={setContext} />
+        </AdvancedPanel>
+
+        {/* ===== MAIN COMPACT CARD (kiểu Topview Video Agent V2) ===== */}
+        <VideoAgentCard
+          prompt={prompt}
+          onPromptChange={setPrompt}
+          referenceImages={referenceImages}
+          onReferenceImagesChange={setReferenceImages}
+          model={model}
+          onModelChange={handleModelChange}
+          aspectRatio={aspectRatio}
+          onAspectRatioChange={setAspectRatio}
+          resolution={resolution}
+          onResolutionChange={setResolution}
+          durationS={durationS}
+          onDurationChange={setDurationS}
+          audioMode={audioMode}
+          onAudioModeChange={setAudioMode}
+          numShots={numShots}
+          onNumShotsChange={setNumShots}
+          costVnd={costVnd}
+          costCredits={costCredits}
+          isGenerating={isGenerating}
+          jobProgress={jobStatus?.progress}
+          canSubmit={canSubmit}
+          onSubmit={handleSubmit}
+        />
+
+        {/* ===== INSPIRATION GALLERY ===== */}
+        <div className="mt-16 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <div className="text-[11px] uppercase tracking-widest text-text-subtle font-medium mb-1 flex items-center gap-1.5">
+                <Eye className="w-3 h-3" /> Cảm hứng từ video mẫu
+              </div>
+              <div className="text-lg font-bold text-text">Xem demo phong cách</div>
+            </div>
+            <div className="text-[11px] text-text-subtle">{INSPIRATION_CARDS.length} video tham khảo</div>
+          </div>
+          <GenerateFormats cards={INSPIRATION_CARDS} />
+        </div>
+      </div>
+
+      {/* MODAL — Multi-Scene Editor (Phase 2 — NEW v3, replace ProposalModal) */}
+      {showSceneEditor && (
+        <SceneEditorModal
+          proposal={proposal}
+          referenceImages={referenceImages}
+          isLoading={isProposing}
+          progress={proposeProgress}
+          error={proposeError}
+          onClose={handleSceneEditorClose}
+          onStartGeneration={handleStartGeneration}
+          onReject={handleSceneEditorClose}
+          onRetry={handleSubmit}
+        />
+      )}
+
+      {/* MODAL — Render Result (Phase 3) */}
+      {showResultModal && (
+        <JobResultModal
+          status={jobStatus}
+          error={error}
+          onClose={handleCloseModal}
+          onCancel={cancelJob}
+        />
+      )}
+    </main>
+  );
+}
