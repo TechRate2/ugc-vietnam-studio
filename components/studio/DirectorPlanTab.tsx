@@ -18,7 +18,7 @@
 import { useState } from 'react';
 import {
   Sparkles, Film, Image as ImgIcon, ClipboardCheck, AlertTriangle,
-  Loader2, Check, RefreshCw, Wand2, Undo2,
+  Loader2, Check, RefreshCw, Wand2, Undo2, Mic,
 } from 'lucide-react';
 import type { DirectorPlan, Shot, ReferenceAsset } from '@/lib/studio/use-director-plan';
 import {
@@ -29,6 +29,7 @@ import {
 import { useDirectorPlanEditor } from '@/lib/studio/use-director-plan-editor';
 import type { VideoSettings } from '@/lib/types/backend';
 import { RefineDrawer } from './RefineDrawer';
+import { AudioStudioDrawer } from './AudioStudioDrawer';
 
 interface Props {
   plan: DirectorPlan | null;
@@ -36,7 +37,9 @@ interface Props {
   isLoading: boolean;
   progress?: ProgressEvent | null;
   error: string | null;
-  onApprove: (planWithStoryboards: DirectorPlan) => void;
+  /** When the user approves, the caller receives the edited plan + optional
+   *  `audioPlan.driven_audio_urls` map (from Audio Studio) for Wan lip-sync. */
+  onApprove: (planWithStoryboards: DirectorPlan, audioPlan?: { driven_audio_urls?: Record<string, string> }) => void;
   onRetry?: () => void;
   onCancel?: () => void;
   /** When set, enables per-shot "Refine" button on Shot List + Evaluation tabs.
@@ -71,6 +74,9 @@ export function DirectorPlanTab({
   const [refineShotId, setRefineShotId] = useState<string | null>(null);
   // Track refined clips so the UI can show "Refined" badge after job done.
   const [refinedOutputs, setRefinedOutputs] = useState<Record<string, string>>({});
+  // V3 §4.5 — Audio Studio drawer + per-shot TTS URL map (consumed by Wan lip-sync)
+  const [showAudioStudio, setShowAudioStudio] = useState(false);
+  const [drivenAudioUrls, setDrivenAudioUrls] = useState<Record<string, string>>({});
 
   // V3 HitL inline edit — local mutable plan with dirty tracking.
   // Storyboard generation results take precedence (server-returned plan with
@@ -153,6 +159,25 @@ export function DirectorPlanTab({
           </TabButton>
         </div>
         <div className="text-xs text-text-subtle flex items-center gap-3">
+          {(() => {
+            const dialogueShots = shot_list.filter((s) => s.audio.dialogue_vn && s.audio.dialogue_vn.trim()).length;
+            if (dialogueShots === 0) return null;
+            const tts_done = Object.keys(drivenAudioUrls).length;
+            return (
+              <button
+                onClick={() => setShowAudioStudio(true)}
+                className={`inline-flex items-center gap-1 transition ${
+                  tts_done > 0
+                    ? 'text-emerald-300 hover:text-emerald-200'
+                    : 'text-text-muted hover:text-brand-300'
+                }`}
+                title="Mở Audio Studio — pre-render TTS cho Wan lip-sync"
+              >
+                <Mic className="w-3 h-3" /> Audio
+                <span className="text-[10px] font-mono">({tts_done}/{dialogueShots})</span>
+              </button>
+            );
+          })()}
           {editor.isDirty && (
             <button
               onClick={editor.reset}
@@ -204,6 +229,17 @@ export function DirectorPlanTab({
         )}
       </div>
 
+      {/* Audio Studio drawer — voice picker + per-shot TTS preview */}
+      {showAudioStudio && effectivePlan && (
+        <AudioStudioDrawer
+          open={true}
+          plan={effectivePlan}
+          initialUrls={drivenAudioUrls}
+          onClose={() => setShowAudioStudio(false)}
+          onApply={(urls) => setDrivenAudioUrls(urls)}
+        />
+      )}
+
       {/* Per-shot Refine Drawer */}
       {refine && refineShotId && effectivePlan && (
         <RefineDrawer
@@ -250,7 +286,12 @@ export function DirectorPlanTab({
             </button>
           )}
           <button
-            onClick={() => onApprove(effectivePlan)}
+            onClick={() => onApprove(
+              effectivePlan,
+              Object.keys(drivenAudioUrls).length > 0
+                ? { driven_audio_urls: drivenAudioUrls }
+                : undefined,
+            )}
             disabled={hasRedFlags}
             title={hasRedFlags ? 'Có red flag — sửa trước khi approve' : ''}
             className="px-4 py-2 text-xs font-medium rounded-md bg-gradient-to-r from-brand-500 to-fuchsia-500 hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white inline-flex items-center gap-1.5"

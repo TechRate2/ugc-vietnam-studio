@@ -52,7 +52,10 @@ export function DirectorPlanModal({
 
   if (!open) return null;
 
-  const handleApprove = async (finalPlan: DirectorPlan) => {
+  const handleApprove = async (
+    finalPlan: DirectorPlan,
+    audioPlan?: { driven_audio_urls?: Record<string, string> },
+  ) => {
     setApproving(true);
     setJobError(null);
     try {
@@ -60,6 +63,7 @@ export function DirectorPlanModal({
         plan: finalPlan,
         reference_images: referenceImages,
         settings,
+        audio_plan: audioPlan,
       });
       onJobStarted(job.job_id);
       onClose();
