@@ -38,6 +38,7 @@ from vendors.atlascloud import atlas_client
 from vendors import r2_storage
 from workers.assemble_worker import AssembleWorker
 from workers import cost_gate
+from core import director_history
 
 
 # ============================================================
@@ -345,6 +346,24 @@ async def render_plan(
         f"[VideoWorker V3] {job_id} DONE — {len(shots)} shots, "
         f"{sum(s.duration_s for s in shots)}s total → {output_url}"
     )
+
+    # Persist to Project History (restart-safe + listable in UI)
+    try:
+        director_history.record_job(
+            job_id=job_id,
+            plan_id=plan.plan_id,
+            mode=(jobs_store or {}).get(job_id, {}).get("mode") or "approved",
+            status="done",
+            output_url=output_url,
+            title=bible.title,
+            duration_s=sum(s.duration_s for s in shots),
+            cost_estimate_usd=plan.cost_estimate.total_cost_usd,
+            plan=plan.model_dump(),
+            chain=chain_meta,
+            created_at=(jobs_store or {}).get(job_id, {}).get("created_at"),
+        )
+    except Exception as e:
+        logger.warning(f"[VideoWorker V3] director_history.record_job fail (non-fatal): {e}")
 
     return {
         "output_path": str(color_pass_mp4),

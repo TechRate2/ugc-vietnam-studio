@@ -1,6 +1,6 @@
 'use client';
 import { useState, useMemo } from 'react';
-import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon } from 'lucide-react';
+import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon, History } from 'lucide-react';
 import { GenerateFormats, type FormatCard } from './GenerateFormats';
 import { JobResultModal } from './JobResultModal';
 import { VideoAgentCard } from './VideoAgentCard';
@@ -8,6 +8,8 @@ import { ContextInjection } from './ContextInjection';
 import { AdvancedPanel } from './AdvancedPanel';
 import { DirectorPlanModal, useDirectorJobPoll } from './DirectorPlanModal';
 import { ReferenceZones, type ReferenceZonesValue } from './ReferenceZones';
+import { ProjectHistoryDrawer } from './ProjectHistoryDrawer';
+import type { DirectorPlan } from '@/lib/studio/use-director-plan';
 // V3 Director-only context-injection types (kept locally to avoid the removed use-propose-job hook)
 type ContextInjectionType = {
   pain_points?: string;
@@ -92,6 +94,10 @@ export function StudioMain() {
   const directorJob = useDirectorJobPoll(directorJobId);
   const [showResultModal, setShowResultModal] = useState(false);
   const isGenerating = Boolean(directorJobId) && (directorJob?.status as string) !== 'done' && (directorJob?.status as string) !== 'failed';
+
+  // Project History drawer
+  const [showHistory, setShowHistory] = useState(false);
+  const [forkedPlan, setForkedPlan] = useState<DirectorPlan | null>(null);
 
   // Computed
   const modelConfig = getModelConfig(model);
@@ -213,6 +219,12 @@ export function StudioMain() {
             30% OFF
           </span>
         </a>
+        <button
+          onClick={() => setShowHistory(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition"
+        >
+          <History className="w-3.5 h-3.5 text-fuchsia-300" /> History
+        </button>
         <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition">
           <FolderArchive className="w-3.5 h-3.5 text-emerald-300" /> Assets
         </button>
@@ -383,6 +395,41 @@ export function StudioMain() {
           }}
         />
       )}
+
+      {/* DRAWER — Project History (V3) */}
+      <ProjectHistoryDrawer
+        open={showHistory}
+        onClose={() => setShowHistory(false)}
+        onFork={(plan) => {
+          // Fork — preload state from history plan
+          const cb = plan.continuity_bible;
+          setPrompt(cb.logline || cb.title);
+          setDurationS(cb.duration_s);
+          setAspectRatio((cb.aspect_ratio as AspectRatio) || '9:16');
+          setForkedPlan(plan);
+          // Seed reference zones từ bible.reference_assets (with role tags)
+          if (Array.isArray(cb.reference_assets) && cb.reference_assets.length > 0) {
+            setReferenceZones({
+              images: cb.reference_assets.map((r) => r.url),
+              roles: cb.reference_assets.map((r) => {
+                const map: Record<string, ReferenceZonesValue['roles'][number]> = {
+                  character_anchor: 'primary_subject',
+                  secondary_character: 'secondary_subject',
+                  product_hero: 'product_hero',
+                  product_detail: 'product_detail',
+                  style_reference: 'style_reference',
+                  environment: 'environment',
+                  brand_asset: 'brand_asset',
+                };
+                return map[r.role] ?? null;
+              }),
+              storyboardImages: cb.reference_assets
+                .filter((r) => r.role === 'style_reference')
+                .map((r) => r.url),
+            });
+          }
+        }}
+      />
     </main>
   );
 }

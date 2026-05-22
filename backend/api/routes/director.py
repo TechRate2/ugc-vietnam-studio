@@ -36,6 +36,7 @@ from agent.schemas import DirectorPlan, ContinuityBible, Shot, StoryboardFrame
 from agent import continuity_manager
 from api.schemas import ProductInput, VideoSettings
 from workers import video_worker
+from core import director_history
 
 
 router = APIRouter()
@@ -597,3 +598,32 @@ async def cancel_job(job_id: str):
         raise HTTPException(404, "job not found")
     _JOBS_STORE[job_id].update(status="cancelled")
     return {"job_id": job_id, "status": "cancelled"}
+
+
+# ============================================================
+# Project History — list / detail / delete persisted jobs
+# ============================================================
+@router.get("/history")
+async def list_history(limit: int = 50, status: Optional[str] = None):
+    """List recent Director V3 jobs (persisted to data/director_history.db).
+
+    Sorted by `finished_at` desc. Each item is a thin summary; full plan +
+    chain meta available via GET /history/{job_id}.
+    """
+    return {"items": director_history.list_jobs(limit=limit, status_filter=status)}
+
+
+@router.get("/history/{job_id}")
+async def get_history(job_id: str):
+    """Full snapshot incl. plan + chain — used by Fork / Replay."""
+    item = director_history.get_job(job_id, include_plan=True)
+    if not item:
+        raise HTTPException(404, f"history job '{job_id}' not found")
+    return item
+
+
+@router.delete("/history/{job_id}")
+async def delete_history(job_id: str):
+    if not director_history.delete_job(job_id):
+        raise HTTPException(404, f"history job '{job_id}' not found")
+    return {"ok": True, "job_id": job_id}
