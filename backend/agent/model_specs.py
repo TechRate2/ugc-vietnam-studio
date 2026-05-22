@@ -482,7 +482,7 @@ def build_payload(
     if prompt:
         payload["prompt"] = prompt
 
-    # Duration validate
+    # Duration validate (incl. discrete-values enforcement for Wan 2.7 — 5 or 10 only)
     if duration_s is not None:
         d = spec["duration"]
         if d.get("auto_sentinel") is not None and duration_s == d["auto_sentinel"]:
@@ -492,6 +492,21 @@ def build_payload(
                 f"Duration {duration_s}s ngoài range {d['min']}-{d['max']}s cho {model_key}"
             )
         else:
+            # BUG #2 fix — when the spec declares discrete_values (Wan 2.7 = [5, 10]),
+            # snap to the closest allowed value rather than failing the render. This
+            # protects downstream code from `7s` slipping through (range-check pass
+            # but AtlasCloud 400 reject).
+            discrete = d.get("discrete_values")
+            if isinstance(discrete, list) and discrete:
+                if duration_s not in discrete:
+                    snapped = min(discrete, key=lambda v: abs(v - duration_s))
+                    # Log a clear warning so callers see the snap happened.
+                    import logging as _log
+                    _log.getLogger(__name__).warning(
+                        f"[model_specs] {model_key} duration {duration_s}s snapped to "
+                        f"{snapped}s (allowed discrete: {discrete})"
+                    )
+                    duration_s = snapped
             payload["duration"] = duration_s
 
     # Resolution validate

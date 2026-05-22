@@ -89,6 +89,9 @@ class SceneRenderJob:
     movement_amplitude: str = "auto"
     return_last_frame: bool = True
     model_key: str = "seedance_2_0_ref"
+    # BUG #1 fix — driven-audio URL for Wan 2.7 lip-sync.
+    # Set ONLY when audio_capability=="driven". Renderer passes via field `audio`.
+    audio_url: Optional[str] = None
 
     def to_atlas_kwargs(self) -> dict:
         """Convert to kwargs for `atlas_client.generate_video()`."""
@@ -102,6 +105,7 @@ class SceneRenderJob:
             "return_last_frame": self.return_last_frame,
             "generate_audio": self.generate_audio,
             "movement_amplitude": self.movement_amplitude,
+            "audio_url": self.audio_url,
         }
         if self.render_mode == "i2v_chain" and self.chain_input_url:
             kwargs["image"] = self.chain_input_url
@@ -170,6 +174,7 @@ def generate_scene(
     llm_mode: bool = True,
     resolution: str = "720p",
     is_last_shot: bool = False,
+    driven_audio_url: Optional[str] = None,
 ) -> SceneRenderJob:
     """Build a `SceneRenderJob` for one shot.
 
@@ -184,6 +189,11 @@ def generate_scene(
         llm_mode:           True (default) = 1 LLM call. False = deterministic.
         resolution:         Output resolution (e.g. `720p`).
         is_last_shot:       If True, `return_last_frame=False` (no chain after).
+        driven_audio_url:   Optional pre-rendered TTS / audio URL for models
+                            with `audio_capability=="driven"` (Wan 2.7). When
+                            supplied, the renderer passes it as the `audio`
+                            field so Wan does true lip-sync — otherwise mouth
+                            movements are random and don't match the dialogue.
     """
     # ---- Resolve render_mode -------------------------------------------------
     is_chain = bool(shot.continuity.previous_shot_id) and bool(last_frame_url)
@@ -276,6 +286,10 @@ def generate_scene(
     if isinstance(llm_model_params.get("generate_audio"), bool):
         generate_audio = llm_model_params["generate_audio"]
 
+    # Wan-style driven audio: only attach when the model needs it.
+    # Other models ignore this field; build_payload also drops it via spec check.
+    attached_audio_url = driven_audio_url if _audio_cap == "driven" else None
+
     return SceneRenderJob(
         shot_id=shot.shot_id,
         prompt=prompt,
@@ -290,6 +304,7 @@ def generate_scene(
         movement_amplitude=movement_amplitude,
         return_last_frame=not is_last_shot,
         model_key=model_key,
+        audio_url=attached_audio_url,
     )
 
 

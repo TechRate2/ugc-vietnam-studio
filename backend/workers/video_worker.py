@@ -117,6 +117,16 @@ async def render_plan(
     """
     bible = plan.continuity_bible
     shots = plan.shot_list
+
+    # BUG #5 fix — "auto" giờ thật sự pick model dựa trên plan (heuristic).
+    # Trước đó hardcode về seedance_2_0, không xứng với label "Auto".
+    if user_model == "auto":
+        from agent.model_picker import pick_model_for_plan
+        picked, reasoning = pick_model_for_plan(plan, budget_tier="balanced")
+        logger.info(f"[VideoWorker V3] auto-pick → {picked}: {reasoning}")
+        _update_job(jobs_store, job_id, auto_pick={"model": picked, "reasoning": reasoning})
+        user_model = picked
+
     ref_key_default, i2v_key_default = _resolve_models(user_model)
 
     # ---- Optional Cost Gate (Stage 0) ----------------------------------------
@@ -198,7 +208,12 @@ async def render_plan(
     work_dir = Path(tempfile.gettempdir()) / f"cineforge_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    last_frame_url: Optional[str] = None
+    # BUG #3 fix — track last_frame by shot_id, not just "the previous one
+    # we rendered". This is required when a shot chains back to a shot earlier
+    # than the immediate predecessor (e.g. flashback / cutaway pattern where
+    # S3.previous_shot_id == "S1"). The previous implementation always passed
+    # the most-recently-rendered last_frame, which silently drifted identity.
+    last_frame_urls_by_shot_id: dict[str, Optional[str]] = {}
     clip_paths: list[Path] = []
     chain_meta: list[dict] = []
     total_shots = len(shots)
@@ -219,12 +234,26 @@ async def render_plan(
         else:
             ref_key, i2v_key = ref_key_default, i2v_key_default
 
-        will_chain = (
-            shot.continuity.previous_shot_id is not None
-            and last_frame_url is not None
-            and i > 0
-        )
+        # Look up the chain anchor by the explicit previous_shot_id — not "i-1".
+        chain_anchor_url: Optional[str] = None
+        psid = shot.continuity.previous_shot_id
+        if psid:
+            chain_anchor_url = last_frame_urls_by_shot_id.get(psid)
+        will_chain = chain_anchor_url is not None and i > 0
         active_model_key = i2v_key if will_chain else ref_key
+
+        # BUG #1 fix: For Wan 2.7 (driven audio) shots with dialogue, pass the
+        # pre-rendered voice URL into Layer 2 so the renderer can attach it via
+        # the `audio` field — this is what enables true lip-sync. The URL comes
+        # from `audio_plan.voice_audio_url` (set by the TTS pre-pass) or
+        # `audio_plan.driven_audio_urls[shot_id]` for per-shot voice tracks.
+        driven_audio_url: Optional[str] = None
+        if audio_plan and shot.audio.dialogue_vn:
+            per_shot_map = audio_plan.get("driven_audio_urls") if isinstance(audio_plan, dict) else None
+            if isinstance(per_shot_map, dict):
+                driven_audio_url = per_shot_map.get(shot.shot_id)
+            if not driven_audio_url:
+                driven_audio_url = audio_plan.get("voice_audio_url")
 
         # Build the prompt via Layer 2 (LLM or deterministic).
         job = await asyncio.to_thread(
@@ -233,10 +262,11 @@ async def render_plan(
             shot=shot,
             model_key=active_model_key,
             reference_images=reference_images,
-            last_frame_url=last_frame_url if will_chain else None,
+            last_frame_url=chain_anchor_url if will_chain else None,
             llm_mode=use_llm_scene_gen,
             resolution=resolution,
             is_last_shot=(i == total_shots - 1),
+            driven_audio_url=driven_audio_url,
         )
 
         kwargs = job.to_atlas_kwargs()
@@ -258,14 +288,16 @@ async def render_plan(
         await _download_file(clip_url, clip_path)
         clip_paths.append(clip_path)
 
-        last_frame_url = result.get("last_frame_url")
+        produced_last_frame = result.get("last_frame_url")
+        last_frame_urls_by_shot_id[shot.shot_id] = produced_last_frame
         chain_meta.append({
             "shot_id": shot.shot_id,
             "model_key": job.model_key,
             "render_mode": job.render_mode,
             "video_url": clip_url,
-            "last_frame_url": last_frame_url,
+            "last_frame_url": produced_last_frame,
             "duration_s": job.duration_s,
+            "chained_from": psid if will_chain else None,
         })
 
     # Stage 3 — Assemble

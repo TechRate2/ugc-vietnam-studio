@@ -59,29 +59,54 @@ def evaluate_draft_clip(
 ) -> CostGateDecision:
     """Score a draft (shot 0) against Bible expectations.
 
-    We piggyback on the existing `evaluation_layer.evaluate_plan()` LLM — but
-    pass it a single-shot snapshot of the plan focused on `draft_shot_id`.
-    The LLM evaluates consistency + cinematic against the Bible.
+    BUG #6 fix — we pass the FULL plan to the evaluator (so it sees the
+    narrative arc, pacing curve, every shot's purpose) but tag clearly that
+    only `draft_shot_id` was actually rendered. This avoids the previous bias
+    where trimming the plan to 1 shot caused the LLM to undercharge pacing
+    and viral scores (no arc visible).
 
-    Why not compare frames directly? Reasoning models score Bible compliance
-    cheaper and faster than CLIP/face-embedding pipelines, and they catch
-    "wrong outfit / wrong location / dialogue mismatch" which embeddings miss.
+    The evaluator is also told to weight CONSISTENCY (Bible compliance of the
+    draft shot) heavily and IGNORE the unrendered shots when scoring
+    cinematic / pacing aesthetics — those will be re-evaluated post final
+    render.
+
+    Why LLM and not CLIP/face-embedding? Reasoning models catch semantic drift
+    (wrong outfit / wrong dialogue / wrong location) cheaper and richer than
+    embeddings, which only measure visual similarity.
     """
-    # Trim plan to just the draft shot + Bible context for the evaluator
-    draft_view = {
-        "continuity_bible": plan_dict["continuity_bible"],
-        "shot_list": [
-            s for s in plan_dict["shot_list"] if s["shot_id"] == draft_shot_id
-        ],
-        "storyboard_grid": [
-            f for f in plan_dict.get("storyboard_grid", []) if f["shot_id"] == draft_shot_id
-        ],
-    }
+    total_dur = sum(s["duration_s"] for s in plan_dict.get("shot_list", []))
+    draft_shot = next(
+        (s for s in plan_dict.get("shot_list", []) if s["shot_id"] == draft_shot_id),
+        None,
+    )
+    if draft_shot is None:
+        logger.warning(f"[cost_gate] draft_shot_id {draft_shot_id} not in plan — PASS by default")
+        return CostGateDecision(
+            pass_=True, score=0.0, threshold=threshold,
+            reasoning=f"shot_id {draft_shot_id} not found; proceeded conservatively",
+            suggestions=[],
+        )
+
+    draft_brief = (
+        f"COST-GATE DRAFT EVALUATION: Only shot `{draft_shot_id}` has been rendered "
+        f"as a Fast-tier draft (cost-gate stage). The remaining shots in the plan "
+        f"are PLANNED, NOT yet rendered. Focus your scoring on: "
+        f"(1) consistency_score — does the draft shot honor the Bible "
+        f"(character face_signature, outfit, products, visual_style)? "
+        f"(2) brand_safety_score — does it violate any constraint? "
+        f"For cinematic / pacing / viral, score the PLAN, not the draft alone "
+        f"(since only 1 of {len(plan_dict.get('shot_list', []))} shots is real). "
+        f"Render decision: if consistency or brand_safety is weak, abort to save credits."
+    )
     try:
         report: EvaluationReport = evaluate_plan(
-            plan_dict=draft_view,
-            user_brief="(draft cost-gate check)",
-            tech_config={"duration_s": draft_view["shot_list"][0]["duration_s"]},
+            plan_dict=plan_dict,  # full plan — Bible + Shot List + Storyboard
+            user_brief=draft_brief,
+            tech_config={
+                "duration_s": total_dur,
+                "draft_only_shot_id": draft_shot_id,
+                "draft_only_shot_duration_s": draft_shot["duration_s"],
+            },
         )
     except Exception as e:
         logger.warning(f"[cost_gate] eval LLM fail — defaulting to PASS to not block user: {e}")
@@ -91,12 +116,14 @@ def evaluate_draft_clip(
             suggestions=[],
         )
 
-    # Weighted score — focus on consistency + cinematic for cost gate
+    # Cost-gate weighting — heavier on consistency + brand_safety (Bible compliance
+    # is the ONLY thing the rendered draft can prove); lighter on pacing/cinematic
+    # (those depend on the unrendered shots).
     score = round(
-        0.45 * report.consistency_score
-        + 0.20 * report.cinematic_score
-        + 0.15 * report.pacing_score
-        + 0.20 * report.brand_safety_score,
+        0.50 * report.consistency_score
+        + 0.30 * report.brand_safety_score
+        + 0.10 * report.cinematic_score
+        + 0.10 * report.pacing_score,
         2,
     )
     passed = score >= threshold and not report.red_flags
@@ -106,9 +133,12 @@ def evaluate_draft_clip(
         score=score,
         threshold=threshold,
         reasoning=(
-            f"Draft passed (score {score} ≥ {threshold})."
+            f"Draft passed (weighted score {score} ≥ {threshold}, "
+            f"consistency={report.consistency_score}, brand_safety={report.brand_safety_score})."
             if passed
-            else f"Draft failed (score {score} < {threshold})."
+            else f"Draft failed (weighted score {score} < {threshold}, "
+                 f"consistency={report.consistency_score}, "
+                 f"red_flags={len(report.red_flags)})."
         ),
         suggestions=report.suggestions[:5],
         raw_report=report.model_dump(),

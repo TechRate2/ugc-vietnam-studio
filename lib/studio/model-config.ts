@@ -18,6 +18,9 @@ export interface ModelConfig {
   description: string;
   max_references: number;
   max_duration_s: number;
+  /** When set, the model only accepts these discrete duration values (e.g. Wan 2.7 = [5, 10]).
+   *  UI must constrain the duration picker to these values. */
+  duration_discrete?: number[];
   cost_per_second_usd: number;
   supports_audio_driven: boolean;
   supports_silent_only: boolean;
@@ -41,19 +44,20 @@ export const MODEL_CONFIGS: Record<VideoModel, ModelConfig> = {
   // V3 — 'auto' = let backend picker decide. UI hiển thị placeholder, backend dispatch.
   auto: {
     id: 'auto',
-    name_vn: 'Tự động (AI chọn model)',
-    name_short: 'Auto',
-    description: 'AI chấm 6 model + pick fit script nhất theo Topview pattern.',
+    name_vn: 'Mặc định (Seedance 2.0)',
+    name_short: 'Default',
+    description: 'Mặc định Seedance 2.0 — multi-shot native, audio, max 9 refs.',
+    // Limits match what `auto` actually resolves to on the backend (seedance_2_0).
     max_references: 9,
-    max_duration_s: 16,
-    cost_per_second_usd: 0,  // không biết trước
-    supports_audio_driven: true,
+    max_duration_s: 15,
+    cost_per_second_usd: 0.096,
+    supports_audio_driven: false,
     supports_silent_only: false,
     supports_multi_shot_native: true,
     supports_native_audio: true,
-    best_for: ['AI chọn tự động dựa script'],
-    syntax_style: 'Adaptive — picker chọn format đúng model',
-    resolution_options: ['480p', '540p', '720p', '720P', '1080p', '1080P'],
+    best_for: ['Mặc định an toàn cho mọi niche'],
+    syntax_style: 'Multi-shot timeline + @image refs',
+    resolution_options: ['480p', '720p', '720p-SR', '1080p', '1080p-SR'],
     resolution_default: '720p',
   },
   vidu_q3: {
@@ -79,39 +83,46 @@ export const MODEL_CONFIGS: Record<VideoModel, ModelConfig> = {
     id: 'vidu_q3_mix',
     name_vn: 'Vidu Q3-Mix',
     name_short: 'Vidu Q3-Mix',
-    description: 'Premium 1080p, chất lượng cao hơn Q3 thường.',
+    description: 'Premium variant — hỗ trợ @image_N tags + 720p/1080p.',
     max_references: 4,
     max_duration_s: 16,
     cost_per_second_usd: 0.106,
     supports_audio_driven: false,
     supports_silent_only: false,
-    supports_multi_shot_native: false,
+    // BUG #4 fix — Vidu Q3 Mix DOES understand `@image_N` tags (vs Q3 non-mix
+    // which binds by array order). This matches backend `_MODELS_SUPPORT_IMAGE_TAGS`.
+    supports_multi_shot_native: true,
     supports_native_audio: true,
-    best_for: ['Premium ad', '1080p quality', 'Brand showcase'],
-    syntax_style: 'Detailed scene description, focus chi tiết 1080p',
-    resolution_options: ['1080p'],
-    resolution_default: '1080p',
-    reference_hint_vn: '💡 Vidu Q3 Mix premium 1080p — upload 2-3 ảnh product MULTI-ANGLE + 1 ảnh character cho consistency tối đa.',
+    best_for: ['Premium ad', '720p/1080p', 'Multi-subject scene'],
+    syntax_style: 'Descriptive + @image_1, @image_2 tags để bind subject',
+    // BUG #4 fix — backend spec cho phép 720p + 1080p. Lock 1080p only trước đó
+    // làm user mất tuỳ chọn rẻ hơn (~30%) ở quality 720p.
+    resolution_options: ['720p', '1080p'],
+    resolution_default: '720p',
+    reference_hint_vn: '💡 Vidu Q3 Mix hiểu @image_1, @image_2 tags. Upload tối đa 4 ảnh — primary subject ở vị trí đầu.',
   },
 
   wan_2_7: {
     id: 'wan_2_7',
     name_vn: 'Wan 2.7',
     name_short: 'Wan 2.7',
-    description: 'Audio-driven lip-sync tiếng Việt — 1 portrait + audio.',
-    max_references: 1,  // V3.5 fix — Wan 2.7 chỉ accept 1 image
-    max_duration_s: 10,  // V3.5 fix — discrete {5, 10} valid
+    description: 'Lip-sync VN driven by audio URL — 1 portrait + 1 audio file.',
+    max_references: 1,
+    max_duration_s: 10,
+    duration_discrete: [5, 10],  // BUG #4 fix — explicit lock in FE
     cost_per_second_usd: 0.1,
+    // BUG #4 fix — Wan uses DRIVEN audio (field `audio` URL), NOT native gen.
+    // FE should NOT advertise native audio — would mislead users into thinking
+    // the model auto-generates dialogue.
     supports_audio_driven: true,
     supports_silent_only: false,
     supports_multi_shot_native: false,
-    supports_native_audio: true,
+    supports_native_audio: false,
     best_for: ['Talking head VN', 'Lip-sync khớp môi', 'Dialogue presenter'],
-    syntax_style: 'Portrait + audio (no prompt heavy)',
-    // V3.5 fix per AtlasCloud Wan 2.5 docs (2.7 inherits): lowercase resolution + discrete duration {5,10}
+    syntax_style: 'Portrait + pre-rendered TTS URL (driven audio)',
     resolution_options: ['480p', '720p', '1080p'],
     resolution_default: '720p',
-    reference_hint_vn: '💡 Wan 2.7: upload 1 ảnh PORTRAIT (front-facing, MOUTH UNOBSTRUCTED). Duration chỉ chọn 5s hoặc 10s.',
+    reference_hint_vn: '💡 Wan 2.7: upload 1 ảnh PORTRAIT (front-facing, MOUTH UNOBSTRUCTED). Duration CHỈ chọn 5s hoặc 10s. Audio dialogue cần TTS pre-render → backend tự pass vào field `audio` để lip-sync.',
   },
 
   // AUDIT-C1: REMOVED wan_2_2_turbo (KHÔNG có endpoint Atlas thật)
@@ -119,27 +130,31 @@ export const MODEL_CONFIGS: Record<VideoModel, ModelConfig> = {
     id: 'seedance_1_5_pro',
     name_vn: 'Seedance 1.5 Pro',
     name_short: 'Seedance 1.5 Pro',
-    description: 'Silent multi-ref, 9 ảnh ref, chất lượng cao.',
-    max_references: 9,
+    // BUG #4 fix — Seedance 1.5 Pro chỉ có variants i2v / t2v / i2v-fast trên
+    // AtlasCloud, KHÔNG có ref-to-video. Backend route i2v variant nhận max 1 image.
+    description: 'Image-to-video budget tier — 1 anchor + native audio, 4-12s.',
+    max_references: 1,
     max_duration_s: 12,
     cost_per_second_usd: 0.047,
     supports_audio_driven: false,
-    supports_silent_only: true,
+    supports_silent_only: false,
     supports_multi_shot_native: false,
-    supports_native_audio: false,
-    best_for: ['Silent showcase', 'Product 360', 'B-roll cinematic'],
-    syntax_style: 'Multi-ref prompt với caption overlay TTS post-prod',
+    // BUG #4 fix — spec `extra_fields.generate_audio` default=True → native.
+    supports_native_audio: true,
+    best_for: ['Budget shots', 'Product showcase từ 1 anchor', 'B-roll'],
+    syntax_style: 'Image-to-video — pass 1 anchor image, prompt mô tả motion',
     resolution_options: ['480p', '720p'],
     resolution_default: '720p',
-    reference_hint_vn: '💡 Seedance 1.5 Pro silent ASMR moodboard: upload 5-9 ảnh (product + setting + props detail + lighting refs). Output silent → overlay TTS post-prod.',
+    reference_hint_vn: '💡 Seedance 1.5 Pro chỉ nhận 1 ảnh anchor (image-to-video). Prompt mô tả motion + camera move; reference khác đưa qua Storyboard zone.',
   },
 
   seedance_2_0: {
     id: 'seedance_2_0',
     name_vn: 'Seedance 2.0',
     name_short: 'Seedance 2.0',
-    description: 'Multi-shot native (S1/S2/S3), 12 files ref, cao cấp nhất.',
-    max_references: 12,
+    description: 'Multi-shot native (@image_1..9), audio, cao cấp nhất.',
+    // BUG #4 fix — AtlasCloud spec: max 9 reference_images (NOT 12).
+    max_references: 9,
     max_duration_s: 15,
     cost_per_second_usd: 0.096,
     supports_audio_driven: false,
@@ -148,7 +163,8 @@ export const MODEL_CONFIGS: Record<VideoModel, ModelConfig> = {
     supports_native_audio: true,
     best_for: ['Cinematic multi-shot', 'Narrative storytelling', 'Premium ad'],
     syntax_style: 'Multi-shot timeline S1[0-4s]/S2[4-9s]/S3[9-15s] + @Image refs',
-    resolution_options: ['480p', '720p', '720p-SR', '1080p', '1080p-SR'],
+    // BUG #4 fix — backend spec also lists 1440p-SR; expose it here.
+    resolution_options: ['480p', '720p', '720p-SR', '1080p', '1080p-SR', '1440p-SR'],
     resolution_default: '720p',
     supports_num_shots_override: true,
     num_shots_range: [2, 5],
@@ -160,7 +176,8 @@ export const MODEL_CONFIGS: Record<VideoModel, ModelConfig> = {
     name_vn: 'Seedance 2.0 Fast',
     name_short: 'Seedance 2.0 Fast',
     description: 'Fast variant Seedance 2.0, audio native, cost balance.',
-    max_references: 12,
+    // BUG #4 fix — AtlasCloud spec: max 9 (not 12).
+    max_references: 9,
     max_duration_s: 15,
     cost_per_second_usd: 0.076,
     supports_audio_driven: false,
