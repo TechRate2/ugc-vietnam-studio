@@ -18,8 +18,10 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import { User, Package, Image as ImgIcon, Upload, X } from 'lucide-react';
+import { User, Package, Image as ImgIcon, Upload, X, Library, Save } from 'lucide-react';
 import type { ReferenceRole } from '@/lib/studio/parse-image-mentions';
+import { AssetLibrary } from './AssetLibrary';
+import type { Asset, AssetType } from '@/lib/studio/use-asset-library';
 
 export interface ReferenceZonesValue {
   images: string[];
@@ -34,6 +36,13 @@ interface Props {
 }
 
 type ZoneKey = 'character' | 'product' | 'storyboard';
+
+// Map zone → backend Asset type (AssetLibrary stores 3 same buckets)
+const ZONE_TO_ASSET_TYPE: Record<ZoneKey, AssetType> = {
+  character: 'character',
+  product: 'product',
+  storyboard: 'storyboard',
+};
 
 const ZONE_META: Record<ZoneKey, {
   label: string;
@@ -68,6 +77,58 @@ export function ReferenceZones({ value, onChange, maxTotal = 12 }: Props) {
   // We track which indices originated as storyboard so we can render them in the
   // 3rd zone while keeping a single underlying list for upload to the backend.
   const buckets = bucketByRole(value);
+
+  // Library modal state — which zone opened it (so picks land in right bucket)
+  const [libraryFor, setLibraryFor] = useState<ZoneKey | null>(null);
+
+  const handleSaveToLibrary = useCallback(
+    async (zone: ZoneKey, url: string) => {
+      const name = window.prompt(
+        `Lưu vào Asset Library (${ZONE_META[zone].label}). Đặt tên:`,
+        `${ZONE_META[zone].label} ${new Date().toLocaleDateString('vi-VN')}`,
+      );
+      if (!name?.trim()) return;
+      try {
+        const res = await fetch('/api/v1/assets/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: ZONE_TO_ASSET_TYPE[zone],
+            name: name.trim(),
+            image_url: url,
+            payload: {},
+            tags: '',
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Visual feedback: small toast-style alert (lightweight)
+        // Sau này có thể replace bằng proper toast component.
+        // eslint-disable-next-line no-console
+        console.log('[ReferenceZones] saved to library:', name);
+      } catch (e) {
+        alert(`Lỗi lưu library: ${e instanceof Error ? e.message : e}`);
+      }
+    },
+    [],
+  );
+
+  const handleLibraryPick = useCallback(
+    (zone: ZoneKey, assets: Asset[]) => {
+      if (assets.length === 0) return;
+      const role = ZONE_META[zone].role;
+      const remaining = maxTotal - value.images.length;
+      const toAdd = assets.slice(0, remaining);
+      const urls = toAdd.map((a) => a.image_url);
+      const roles = toAdd.map(() => role) as (ReferenceRole | null)[];
+      const storyboardAdd = zone === 'storyboard' ? urls : [];
+      onChange({
+        images: [...value.images, ...urls],
+        roles: [...value.roles, ...roles],
+        storyboardImages: [...value.storyboardImages, ...storyboardAdd],
+      });
+    },
+    [value, onChange, maxTotal],
+  );
 
   const addToZone = useCallback(
     (zone: ZoneKey, files: FileList | null) => {
@@ -133,6 +194,8 @@ export function ReferenceZones({ value, onChange, maxTotal = 12 }: Props) {
           items={buckets.character}
           onAdd={(files) => addToZone('character', files)}
           onRemove={removeImage}
+          onSaveToLibrary={(url) => handleSaveToLibrary('character', url)}
+          onOpenLibrary={() => setLibraryFor('character')}
           remaining={maxTotal - value.images.length}
         />
         <Zone
@@ -140,6 +203,8 @@ export function ReferenceZones({ value, onChange, maxTotal = 12 }: Props) {
           items={buckets.product}
           onAdd={(files) => addToZone('product', files)}
           onRemove={removeImage}
+          onSaveToLibrary={(url) => handleSaveToLibrary('product', url)}
+          onOpenLibrary={() => setLibraryFor('product')}
           remaining={maxTotal - value.images.length}
         />
         <Zone
@@ -147,9 +212,23 @@ export function ReferenceZones({ value, onChange, maxTotal = 12 }: Props) {
           items={buckets.storyboard}
           onAdd={(files) => addToZone('storyboard', files)}
           onRemove={removeImage}
+          onSaveToLibrary={(url) => handleSaveToLibrary('storyboard', url)}
+          onOpenLibrary={() => setLibraryFor('storyboard')}
           remaining={maxTotal - value.images.length}
         />
       </div>
+
+      {libraryFor && (
+        <AssetLibrary
+          open={true}
+          initialType={ZONE_TO_ASSET_TYPE[libraryFor]}
+          onClose={() => setLibraryFor(null)}
+          onPick={(assets) => {
+            handleLibraryPick(libraryFor, assets);
+            setLibraryFor(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -162,12 +241,16 @@ function Zone({
   items,
   onAdd,
   onRemove,
+  onSaveToLibrary,
+  onOpenLibrary,
   remaining,
 }: {
   zone: ZoneKey;
   items: Array<{ index: number; url: string }>;
   onAdd: (files: FileList | null) => void;
   onRemove: (index: number) => void;
+  onSaveToLibrary: (url: string) => void;
+  onOpenLibrary: () => void;
   remaining: number;
 }) {
   const meta = ZONE_META[zone];
@@ -188,35 +271,53 @@ function Zone({
         <div className="flex items-center gap-1.5 text-text font-medium">
           {meta.icon} <span>{meta.label}</span>
         </div>
-        <button
-          onClick={() => inputRef.current?.click()}
-          disabled={remaining <= 0}
-          className="text-text-subtle hover:text-brand-300 disabled:opacity-40 inline-flex items-center gap-1"
-        >
-          <Upload className="w-3 h-3" />
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(e) => onAdd(e.target.files)}
-        />
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onOpenLibrary}
+            className="text-text-subtle hover:text-brand-300 inline-flex items-center"
+            title="Mở Asset Library"
+          >
+            <Library className="w-3 h-3" />
+          </button>
+          <button
+            onClick={() => inputRef.current?.click()}
+            disabled={remaining <= 0}
+            className="text-text-subtle hover:text-brand-300 disabled:opacity-40 inline-flex items-center gap-1"
+            title="Upload ảnh"
+          >
+            <Upload className="w-3 h-3" />
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => onAdd(e.target.files)}
+          />
+        </div>
       </div>
       <div className="text-[10px] text-text-subtle leading-snug">{meta.hint}</div>
       <div className="flex flex-wrap gap-1 mt-auto">
         {items.length === 0 ? (
           <div className="text-[10px] text-text-subtle italic py-2">
-            Kéo ảnh vào đây hoặc click ↑
+            Kéo ảnh vào đây · click ↑ upload · 📚 chọn từ Library
           </div>
         ) : (
           items.map(({ index, url }) => (
             <div key={index} className="relative group">
               <img src={url} alt="" className="w-12 h-12 rounded-md object-cover border border-border" />
               <button
+                onClick={() => onSaveToLibrary(url)}
+                className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-emerald-500 text-white opacity-0 group-hover:opacity-100 transition flex items-center justify-center"
+                title="Lưu vào Library để reuse"
+              >
+                <Save className="w-2.5 h-2.5" />
+              </button>
+              <button
                 onClick={() => onRemove(index)}
                 className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white opacity-0 group-hover:opacity-100 transition flex items-center justify-center"
+                title="Xoá khỏi shot này"
               >
                 <X className="w-2.5 h-2.5" />
               </button>
