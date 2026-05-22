@@ -1,533 +1,384 @@
-# 🎬 UGC VIETNAM BACKEND v1
+# CineForge AI V3 — Backend
 
-> Backend complete cho app UGC AI Vietnam — như Topview Agent V2 + Higgsfield Marketing Studio nhưng tối ưu cho thị trường VN.
-> 
-> Anh chỉ cần code UI riêng (Electron/Web/Mobile), connect vào backend này qua REST API.
+FastAPI + Pydantic + AtlasCloud — Director Agent V3 (dynamic planning) thay thế hoàn toàn pipeline Analyzer→Generator linear cũ.
 
----
-
-## 🏗️ KIẾN TRÚC
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  FRONTEND (anh tự build sau)                             │
-│  Electron / Next.js / React Native                       │
-└─────────────────────┬────────────────────────────────────┘
-                      │ REST API
-                      ▼
-┌──────────────────────────────────────────────────────────┐
-│  FASTAPI BACKEND (file này)                              │
-│  • /api/v1/jobs — tạo job UGC                            │
-│  • /api/v1/templates — list 30 templates                 │
-│  • /api/v1/avatars — quản lý avatar preset               │
-│  • /api/v1/scrape — scrape Shopee/Lazada                 │
-└─────────────────────┬────────────────────────────────────┘
-                      │
-       ┌──────────────┴────────────────┐
-       ▼                                ▼
-┌─────────────────┐              ┌──────────────────┐
-│ AI AGENT V2     │              │ WORKER POOL      │
-│ Analyzer +      │              │ Video + TTS +    │
-│ Generator       │              │ SFX + Assembly   │
-│ (Claude API)    │              │ (dramatiq)       │
-└─────────────────┘              └──────────────────┘
-       │                                ▼
-       │                       ┌──────────────────┐
-       └──────────────────────►│ VENDOR APIs      │
-                               │ • AtlasCloud     │
-                               │ • Anthropic      │
-                               │ • VBee TTS VN    │
-                               │ • ElevenLabs SFX │
-                               └──────────────────┘
-```
+> Đây là backend cho [UGC Vietnam Studio](../README.md). Frontend Next.js gọi qua proxy `/api/v1/*`.
 
 ---
 
-## 📦 CẤU TRÚC THƯ MỤC
+## 1. Triết lý thiết kế
+
+- **Zero hardcoded templates.** Không còn 30 template skeleton. Director Agent tự sinh shot list 8-15 shots phù hợp brief + duration + niche bất kỳ.
+- **Continuity Bible** là single source of truth. Mọi shot prompt downstream derive từ Bible → identity nhất quán video dài.
+- **Universal Reference.** Mỗi ảnh user upload được Director tag role + binding shot_ids. Scene Gen Agent dùng `continuity_manager.references_for_shot()` để lấy đúng refs cho từng shot.
+- **Reference Chaining.** Shot có `previous_shot_id` → render loop tự swap i2v + pass last frame trước = identity không drift.
+- **Markdown system prompts**, không hardcode trong `.py`. Iterate prompt = sửa file `.md` → reload, không build lại.
+- **Human-in-the-Loop**. Director plan KHÔNG tự render. User review tab Bible/Shot List/Eval → Approve mới fire `/generate`.
+
+---
+
+## 2. Kiến trúc 3 Layer
 
 ```
-ugc_vietnam_backend/
-├── README.md                       ← File này
-├── requirements.txt                ← Python deps
-├── .env.example                    ← Template env (paste API keys)
-├── docker-compose.yml              ← Docker (optional)
+┌─────────────────────────────────────────────────────────────────┐
+│ LAYER 1 — Director Agent V3                                     │
+│   agent/director_agent.py + system_prompts/director.md          │
+│   1 LLM call (DeepSeek-V4-Pro / Claude Sonnet)                  │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │ Continuity Bible:                                       │   │
+│   │   title / logline / intent / duration                   │   │
+│   │   characters[] (face_signature + outfit invariant)      │   │
+│   │   products[] (packaging + hero_features)                │   │
+│   │   visual_style {cinematography, grading, lighting...}   │   │
+│   │   audio_design {mood, tempo, dialogue_style...}         │   │
+│   │   setting {location, time_of_day, atmosphere}           │   │
+│   │   constraints {must_have, must_avoid, brand_safety}     │   │
+│   │   reference_assets[] {index, role, apply_to_shots[]}    │   │
+│   │ Shot List 8-15 shots:                                   │   │
+│   │   visual / audio / continuity / model_routing per shot  │   │
+│   │ Storyboard Grid (prompts cho image gen)                 │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│   + Vision pass nhẹ phân loại refs (optional)                   │
+│   + agent/evaluation_layer.py self-critique scoring             │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+          ✋  Human-in-the-Loop (DirectorPlanModal review/edit)
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ LAYER 2 — Scene Generation Agent                                │
+│   agent/scene_generation_agent.py + system_prompts/scene.md     │
+│   Per shot: build SceneRenderJob {prompt, refs, render_mode}    │
+│   Model-aware format hints:                                     │
+│     - seedance_2_0:      multi_shot_inline ([Shot N — Xs])      │
+│     - seedance_1_5_pro:  time_coded ([0-Xs])                    │
+│     - wan_2_7 / *_i2v:   i2v_motion (motion verbs only)         │
+│     - vidu_q3:           single_descriptive                     │
+│   Modes:                                                        │
+│     - llm_mode=True  (default): 1 LLM call/shot (flexible)      │
+│     - llm_mode=False:           deterministic build (no LLM)    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ LAYER 3 — Video Worker V3                                       │
+│   workers/video_worker.py                                       │
+│   ┌─ For each shot in plan.shot_list (sequential):              │
+│   │  • shot 0 OR no chain → ref_to_video (use bound refs)       │
+│   │  • shot N with previous_shot_id + last_frame_url available  │
+│   │      → swap to i2v variant + image=last_frame_url           │
+│   │  • generate via vendors/atlascloud.generate_video()         │
+│   │  • download clip + capture next last_frame_url              │
+│   └─                                                            │
+│   AssembleWorker:                                               │
+│     • FFmpeg concat with aspect-aware scale                     │
+│     • optional voiceover / SFX overlay                          │
+│     • burn caption_vn (.ass subtitle)                           │
+│   Color consistency pass (Bible-driven FFmpeg eq/curves)        │
+│   → Final MP4                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Folder map
+
+```
+backend/
+├── agent/
+│   ├── schemas.py                Pydantic: ContinuityBible / Shot / DirectorPlan / EvalReport
+│   ├── director_agent.py         ⭐ Layer 1 — singleton `director`
+│   ├── continuity_manager.py     validate / normalize timeline / auto-chain / inject Bible
+│   ├── scene_generation_agent.py ⭐ Layer 2 — SceneRenderJob builder
+│   ├── evaluation_layer.py       Self-critique LLM call
+│   ├── trend_cache.py            Optional VN-TikTok trend SQLite cache
+│   ├── model_specs.py            Per-model AtlasCloud payload spec
+│   ├── model_adapter.py          Cost / model metadata
+│   ├── model_guide.py / model_demos.py
+│   ├── image_specs.py            Seedream / Flux payload
+│   ├── duration_extender.py
+│   └── strategies/               Per-model legacy strategies (kept for jobs.py legacy)
 │
-├── api/                            ← FastAPI endpoints
-│   ├── main.py                     ← App entry point
-│   ├── schemas.py                  ← Pydantic models
+├── system_prompts/               ⭐ Markdown prompts (load via `system_prompts.load("director")`)
+│   ├── __init__.py               lru_cache loader
+│   ├── director.md               Layer 1 — must output strict JSON DirectorPlan
+│   ├── scene.md                  Layer 2 — model-aware prompt formats
+│   └── evaluation.md             Strict scoring rubric
+│
+├── api/
+│   ├── main.py                   Bootstrap, CORS, router mount
+│   ├── schemas.py                Shared request/response schemas
 │   └── routes/
-│       ├── jobs.py                 ← /api/v1/jobs CRUD
-│       ├── templates.py            ← /api/v1/templates
-│       └── avatars.py              ← /api/v1/avatars
+│       ├── director.py           ⭐ V3 — /plan, /plan/stream, /storyboard, /generate, /jobs/{id}
+│       ├── jobs.py               ⚠️ LEGACY — only accepts Director-approved input
+│       ├── video_direct.py / image_direct.py / audio_direct.py
+│       ├── media_upload.py / llm_direct.py / avatars.py
 │
-├── agent/                          ← AI Agent V2 brain ⭐
-│   ├── analyzer.py                 ← Step 1: Phân tích product+avatar
-│   ├── generator.py                ← Step 2: Gen prompt cuối
-│   ├── model_adapter.py            ← Convert sang syntax model
-│   └── duration_extender.py        ← Chia/ghép duration
+├── workers/
+│   ├── video_worker.py           ⭐ Layer 3 V3 (Reference Chaining loop)
+│   ├── assemble_worker.py        FFmpeg pipeline
+│   ├── render_pipeline.py        ⚠️ LEGACY (used only by jobs.py)
+│   └── trend_scanner.py          Cron scraper
 │
-├── workers/                        ← Dramatiq background jobs
-│   ├── scrape_worker.py            ← Scrape Shopee
-│   ├── video_worker.py             ← Call AtlasCloud video
-│   ├── tts_worker.py               ← Call VBee TTS VN
-│   ├── sfx_worker.py               ← Match SFX library
-│   └── assemble_worker.py          ← FFmpeg ghép cuối
+├── vendors/
+│   ├── atlascloud.py             ⭐ Refactored — `generate_video()` returns last_frame_url
+│   │                              + new `generate_video_chain()` helper
+│   ├── atlascloud_llm.py         LLM via AtlasCloud (DeepSeek/Qwen3-VL/Claude)
+│   ├── llm_router.py             AtlasCloud primary + Anthropic fallback
+│   ├── genmax.py                 VN TTS
+│   ├── elevenlabs_sfx.py
+│   ├── anthropic_client.py
+│   └── _retry.py
 │
-├── vendors/                        ← Vendor API clients
-│   ├── atlascloud.py               ← AtlasCloud (image+video+lipsync)
-│   ├── anthropic_client.py         ← Claude wrapper
-│   ├── vbee.py                     ← VBee TTS Vietnamese
-│   └── elevenlabs_sfx.py           ← ElevenLabs SFX
+├── core/
+│   ├── config.py                 Pydantic settings (env)
+│   ├── jobs_store.py             SQLite file-based job persistence
+│   ├── idempotency.py            Stripe-style Idempotency-Key
+│   ├── llm_cache.py / llm_redact.py / sanitize.py
 │
-├── prompts/                        ← Claude system prompts ⭐
-│   ├── analyzer_system.md          ← Train Analyzer
-│   ├── generator_system.md         ← Train Generator
-│   └── few_shot_examples.json      ← 5 examples vàng
-│
-├── templates/                      ← 30 template skeleton ⭐
-│   ├── _index.json                 ← List 30 templates
-│   ├── S1_unboxing_handcam.json
-│   ├── S2_asmr_skincare.json
-│   ├── S3_pain_solution.json
-│   ├── ... (27 more)
-│
-├── sfx_library/                    ← 500 sound effects pre-curated
-│   ├── _index.json
-│   ├── unboxing/
-│   ├── skincare/
-│   ├── fashion/
-│   ├── food/
-│   └── tech/
-│
-├── core/                           ← Utilities
-│   ├── config.py                   ← Settings + ENV loader
-│   ├── database.py                 ← Postgres + SQLAlchemy
-│   ├── storage.py                  ← Cloudflare R2 upload
-│   └── utils.py
-│
-├── db/
-│   └── schema.sql                  ← Postgres schema
-│
-└── scripts/
-    ├── test_agent.py               ← Test Agent V2 với YUUMY balo
-    └── seed_templates.py           ← Import 30 templates vào DB
+├── data/                         SQLite WAL (gitignored)
+└── requirements.txt
 ```
 
 ---
 
-## 🚀 CÀI ĐẶT NHANH (5 PHÚT)
-
-### Bước 1: Clone & install
+## 4. Setup
 
 ```bash
-cd ugc_vietnam_backend
-python -m venv venv
-source venv/bin/activate  # macOS/Linux
-# venv\Scripts\activate    # Windows
-
+cd backend
 pip install -r requirements.txt
+
+# Env (root .env.local — both FE & BE read it)
+ANTHROPIC_API_KEY=sk-ant-xxx
+ATLASCLOUD_API_KEY=...           # image + video gen wallet (Pay-as-you-go)
+ATLASCLOUD_LLM_API_KEY=...       # LLM wallet (Coding Plan)
+GENMAX_API_KEY=...               # VN TTS
+ELEVENLABS_API_KEY=...           # SFX (optional)
+
+# LLM routing — default all via AtlasCloud (1 wallet)
+LLM_PROVIDER=atlascloud
+LLM_MODEL_ANALYZER=deepseek-v4-flash
+LLM_MODEL_GENERATOR=deepseek-v4-pro
+LLM_MODEL_VISION=qwen3-vl-30b-instruct
 ```
 
-### Bước 2: Đăng ký API + paste key
-
-Anh đăng ký 4 nơi (tổng ~$30-50 nạp test):
-- **AtlasCloud** (atlascloud.ai) → Get API key
-- **Anthropic** (anthropic.com) → Get API key Claude
-- **VBee AIVoice** (vbee.vn) → Get API key
-- **ElevenLabs** (elevenlabs.io) → Get API key SFX
-
-Copy `.env.example` → `.env` và paste keys:
+Run:
 
 ```bash
-cp .env.example .env
-nano .env
-```
-
-### Bước 3: Setup database
-
-```bash
-# Postgres (Docker hoặc Supabase free tier)
-docker run -d --name ugc-postgres \
-  -e POSTGRES_PASSWORD=mypass \
-  -e POSTGRES_DB=ugc_vn \
-  -p 5432:5432 postgres:16
-
-# Migrate schema
-psql -h localhost -U postgres -d ugc_vn -f db/schema.sql
-
-# Seed 30 templates
-python scripts/seed_templates.py
-```
-
-### Bước 4: Run
-
-```bash
-# Terminal 1 — FastAPI
 uvicorn api.main:app --reload --port 8000
-
-# Terminal 2 — Worker
-dramatiq workers --processes 4
-
-# Terminal 3 — Test
-python scripts/test_agent.py
+# Swagger: http://localhost:8000/docs
 ```
-
-Mở browser: `http://localhost:8000/docs` → Swagger UI ngay.
 
 ---
 
-## 🎯 API ENDPOINTS
+## 5. API V3 endpoints
 
-### POST `/api/v1/jobs/ugc`
+### `POST /api/v1/director/plan`
 
-**Tạo job UGC video.**
+Sync — Layer 1 builds plan. ~10-30s, ~$0.04 / call.
 
-Request:
-```json
+```jsonc
+// Request
 {
-  "product_input": {
-    "url": "https://shopee.vn/Balo-YUUMY-YBA25-Bagsmart"
+  "product_input": { "url": null, "text_description": "Son lì matte 89k", "image_urls": [] },
+  "reference_images": ["https://...", "data:image/png;base64,..."],   // 0-12
+  "reference_videos": [],                                             // 0-1
+  "user_brief": "Video TikTok 15s nữ Gen Z thử son ở bàn make-up...",
+  "context_injection": {
+    "pain_points": "...", "real_reviews": "...", "usps": "...",
+    "forbidden_to_say": "...", "mood_hint": "..."
   },
-  "avatar_id": "vn_female_hanoi_22yo_preset",
-  "template_id": "S1_unboxing_handcam",
   "settings": {
-    "audio_mode": "silent_native",
-    "model": "vidu_q3",
-    "duration_s": 25,
-    "aspect_ratio": "9:16",
-    "setting_location": "Hanoi student bedroom"
-  }
+    "audio_mode": "dialogue_vo",
+    "model": "seedance_2_0",
+    "duration_s": 15, "aspect_ratio": "9:16", "resolution": "720p",
+    "num_shots": null
+  },
+  "niche_hint": "beauty"   // free string, not enum
 }
-```
 
-Response:
-```json
+// Response — DirectorPlan
 {
-  "job_id": "uuid-xxx",
-  "status": "pending",
-  "estimated_duration_s": 180,
-  "estimated_cost_usd": 1.13,
-  "polling_url": "/api/v1/jobs/uuid-xxx"
+  "plan_id": "dp_abc123",
+  "created_at": "2026-05-22T...Z",
+  "continuity_bible": { ... },
+  "shot_list": [ { "shot_id": "S1", ... }, ... ],
+  "storyboard_grid": [ { "shot_id": "S1", "prompt": "...", "image_size": "1080*1920" }, ... ],
+  "evaluation": { "overall_score": 7.8, "strengths": [...], "weaknesses": [...], "red_flags": [...] },
+  "cost_estimate": { "plan_cost_usd": 0.04, "render_cost_usd": 1.44, ... },
+  "llm_calls_total": 2,
+  "elapsed_s": 18.3
 }
 ```
 
-### GET `/api/v1/jobs/{job_id}`
+### `POST /api/v1/director/plan/stream`
 
-**Poll status job.**
+SSE version. Events:
 
-Response khi đang chạy:
-```json
+```
+event: open       — connection ready
+event: stage      — { stage: "vision|director|evaluation", status: "running|done", message, ... }
+event: complete   — full DirectorPlan JSON
+event: error      — { error: "..." }
+```
+
+### `POST /api/v1/director/storyboard`
+
+Fire Seedream image gen cho từng storyboard frame. Returns updated DirectorPlan với `generated_url` filled. Cost: ~$0.04 / frame × N shots.
+
+### `POST /api/v1/director/generate`
+
+Layer 3 render. Hai mode — chỉ pass MỘT trong hai field `plan` hoặc `plan_request`:
+
+```jsonc
+// MODE A — Human-in-the-Loop (recommended): pass plan đã user approve
 {
-  "job_id": "uuid-xxx",
-  "status": "rendering",
-  "progress": 60,
-  "current_step": "video_worker",
-  "estimated_remaining_s": 120
+  "plan": { ...full DirectorPlan, có thể đã edit... },
+  "reference_images": [ ... ],
+  "settings": { audio_mode, model, duration_s, aspect_ratio, resolution },
+  "audio_plan": null,
+  "use_llm_scene_gen": true
 }
-```
 
-Response khi xong:
-```json
+// MODE B — Auto plan-then-render (skip review): pass plan_request thay vì plan
 {
-  "job_id": "uuid-xxx",
-  "status": "done",
-  "progress": 100,
-  "output_url": "https://r2.com/output/uuid-xxx.mp4",
-  "thumbnail_url": "https://r2.com/output/uuid-xxx.jpg",
-  "duration_s": 25,
-  "cost_actual_usd": 1.08
+  "plan_request": { ...same shape as POST /plan body... },
+  "settings": { ... },
+  "audio_plan": null,
+  "use_llm_scene_gen": true
 }
-```
 
-### GET `/api/v1/templates`
-
-**List 30 templates.**
-
-```json
+// Response (both modes)
 {
-  "templates": [
-    {
-      "id": "S1_unboxing_handcam",
-      "name_vn": "Mở hộp sản phẩm POV",
-      "category": "ASMR",
-      "tier": "S",
-      "default_audio_mode": "silent_native",
-      "thumbnail_url": "...",
-      "sample_video_url": "..."
-    },
-    ...
-  ]
+  "job_id": "job_xxxxx",
+  "polling_url": "/api/v1/director/jobs/job_xxxxx",
+  "estimated_duration_s": 15,
+  "estimated_cost_usd": 1.48,
+  "plan_id": "dp_..."        // returned plan id (mode B will have a fresh one)
 }
 ```
 
-### GET `/api/v1/avatars`
+### `GET /api/v1/director/jobs/{job_id}` · `POST .../cancel`
 
-**List 50 avatar VN preset.**
-
-```json
-{
-  "avatars": [
-    {
-      "id": "vn_female_hanoi_22yo_casual",
-      "ethnicity": "Northern Vietnamese",
-      "age": 22,
-      "gender": "female",
-      "style": "Hanoi casual streetwear",
-      "image_url": "..."
-    },
-    ...
-  ]
-}
-```
+Poll status. Field: `status` (`pending|rendering|assembling|done|failed|cancelled`), `progress` 0-100, `current_step`, `output_path` (when done), `error_message`.
 
 ---
 
-## 🧠 AGENT V2 LOGIC FLOW
+## 6. Legacy endpoints (scheduled removal)
 
-Khi user gọi `POST /api/v1/jobs/ugc`:
-
-```
-1. API nhận request → tạo job record trong DB → return job_id
-2. Trigger worker chain (dramatiq):
-   
-   ┌─ scrape_worker ─────────────────────────┐
-   │   Scrape Shopee/Lazada → product info   │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ analyzer ──────────────────────────────┐
-   │   Claude phân tích product + avatar     │
-   │   → JSON insight                        │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ generator ─────────────────────────────┐
-   │   Claude load template skeleton +       │
-   │   fill với insight + setting            │
-   │   → Output JSON với generations[]       │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ duration_extender ─────────────────────┐
-   │   Chia thành N generation nếu duration  │
-   │   > model max (Vidu max 8s, Seedance 15)│
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ video_worker (parallel) ───────────────┐
-   │   Call AtlasCloud cho từng generation   │
-   │   Gen N+1 dùng last_frame_N làm ref     │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ tts_worker (Mode VO) ──────────────────┐
-   │   VBee TTS VN từ script Claude          │
-   │   → audio_vn.wav                        │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ sfx_worker (Mode ASMR) ────────────────┐
-   │   Match SFX từ library 500 sounds       │
-   │   hoặc ElevenLabs SFX gen text-to-sfx   │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ assemble_worker ───────────────────────┐
-   │   FFmpeg concat videos + overlay audio  │
-   │   + caption ASS burn + BGM lofi -25dB   │
-   │   → Output MP4 9:16                     │
-   └────────────────┬────────────────────────┘
-                    ▼
-   ┌─ Upload Cloudflare R2 ──────────────────┐
-   │   Update job status = "done"            │
-   └─────────────────────────────────────────┘
-```
+`backend/api/routes/jobs.py` + `workers/render_pipeline.py` còn mount tại `/api/v1/jobs/*` để không phá tích hợp client cũ. Banner LEGACY rõ ràng trong source. Chỉ chấp nhận **Director-approved input** (`approved_shots` + `approved_character_sheet` required). Sẽ xoá sau khi mọi caller chuyển sang `/api/v1/director/generate`.
 
 ---
 
-## 🎙️ AUDIO MODE — 2 LỰA CHỌN CHÍNH
+## 7. System prompts — iterate workflow
 
-### Mode 1 — `dialogue_vo` (Lồng tiếng MC)
-```
-Claude script tiếng Việt → VBee TTS → audio.wav
-+
-Vidu Q3 silent video
-+
-FFmpeg overlay audio + caption burn
-= MP4 cuối có giọng MC
-```
+Mọi prompt sống trong `system_prompts/*.md`. Edit → reload server.
 
-### Mode 2 — `silent_native` / `asmr_macro` (Câm ASMR)
-```
-Vidu Q3 silent video (không mở miệng nhân vật)
-+
-SFX library 500 sounds match theo timing
-+
-FFmpeg multi-track overlay + lofi BGM
-= MP4 ASMR aesthetic, không có voice
-```
+| File | Layer | Constraints chính |
+|---|---|---|
+| `director.md` | 1 | MUST output JSON `DirectorPlan` schema, no fences. Tag every reference. Time-budget shots = `tech_config.duration_s`. |
+| `scene.md` | 2 | Embed `face_signature` + `visual_style`. Model-aware format. Negative prompt mandatory. |
+| `evaluation.md` | Eval | Strict scoring 0-10 across 5 dims + `red_flags` block approval. |
 
-→ **App auto-detect Mode theo template** (Unboxing → ASMR, Pain-Solution → VO).
-→ **User override được** từ UI nếu muốn.
+Loader: `system_prompts.load("director")` (lru_cache). KHÔNG import từ `.py` khác.
 
 ---
 
-## 💰 COST PER VIDEO
+## 8. Universal Reference + Reference Chaining
+
+### Universal Reference
+
+User upload N ảnh (max 12). Director tag mỗi ảnh:
+
+```jsonc
+{
+  "index": 0,
+  "url": "https://...",
+  "role": "character_anchor | product_hero | product_detail | style_reference | environment | brand_asset | secondary_character | unknown",
+  "apply_to_shots": ["S1", "S3", "S5"],
+  "notes": "..."
+}
+```
+
+Scene Gen lấy refs cho 1 shot qua `continuity_manager.references_for_shot(bible, shot)`:
+- Union: explicit `shot.continuity.reference_indices` + universal `apply_to_shots` binding
+- Sort priority: character_anchor → secondary_character → product_hero → product_detail → brand_asset → style_reference → environment → unknown
+
+### Reference Chaining
+
+Cho video dài / multi-shot consistency:
+
+1. Director set `shot.continuity.previous_shot_id` = shot_id liền trước (auto-applied bởi `continuity_manager.auto_chain_shots()` nếu cùng character + cùng purpose family)
+2. Render loop ở shot N (N>0): nếu `previous_shot_id` đã set AND prev shot trả `last_frame_url` → swap sang i2v variant của model + pass `image=last_frame_url`
+3. Identity (face / outfit / lighting) inherit gần như 100% từ shot trước
+
+Reset chain: leave `previous_shot_id=null` khi muốn cắt cảnh (location change / time jump / POV switch).
+
+---
+
+## 9. Color consistency pass
+
+Sau khi `AssembleWorker.assemble()` concat clips, `_apply_color_consistency()` chạy 1 FFmpeg pass cuối map `bible.visual_style.color_grading` (string mô tả) → deterministic `eq`/`curves` filter chain:
+
+| Bible color_grading chứa | Filter chain |
+|---|---|
+| `teal`, `orange` | `curves=preset=increase_contrast,eq=saturation=1.10:contrast=1.05` |
+| `warm`, `filmic`, `golden` | `eq=gamma_r=1.06:gamma_b=0.95:saturation=1.05,curves=preset=lighter` |
+| `pastel`, `airy`, `soft` | `eq=brightness=0.02:saturation=0.90:contrast=0.95` |
+| `noir`, `desaturated`, `moody` | `eq=saturation=0.55:contrast=1.10` |
+| `cinematic`, `35mm` | `curves=preset=increase_contrast,eq=saturation=1.05` |
+| (anything else) | `eq=saturation=1.03` |
+
+Mở rộng dễ: edit `workers/video_worker.py::_apply_color_consistency`.
+
+---
+
+## 10. Cost ballpark per plan-then-render
 
 | Component | Cost |
 |---|---|
-| Claude Analyzer (cached) | $0.025 |
-| Claude Generator (cached) | $0.062 |
-| AtlasCloud Vidu Q3 (25s) | $1.05 |
-| VBee TTS VN (Mode VO) | $0.001 |
-| ElevenLabs SFX (Mode ASMR) | $0.10 |
-| FFmpeg local | $0 |
-| **TỔNG/video** | **~$1.15-1.25 (~28-31k VND)** |
+| Director plan (1 LLM, ~2K out tokens) | $0.03-0.06 |
+| Vision pass refs (Qwen3-VL, optional) | $0.01-0.02 |
+| Evaluation (1 LLM analyzer) | $0.005 |
+| Scene Gen LLM per shot × 8-15 | $0.05-0.15 (skip with `use_llm_scene_gen=false`) |
+| Storyboard image gen (optional, $0.04/frame) | $0.30-0.60 |
+| Video render (Seedance 2.0 @ 15s × $0.096) | ~$1.44 |
+| TTS dialogue_vo | ~$0.01 |
+| **Total** | **$1.5–$2.5 / 15s video** |
 
 ---
 
-## 🔧 TUNING + CUSTOMIZATION
+## 11. Troubleshooting
 
-### Thêm template mới
-Tạo file JSON trong `templates/`:
-```json
-{
-  "id": "B5_custom_template",
-  "name_vn": "Tên template",
-  "category": "Lifestyle",
-  "scenes": [...]
-}
-```
-
-Chạy `python scripts/seed_templates.py` → import vào DB.
-
-### Thêm avatar mới
-Upload ảnh → `core/storage.py` → R2.
-Insert vào `avatars` table với metadata.
-
-### Refine prompt quality
-Sửa `prompts/analyzer_system.md` hoặc `prompts/generator_system.md`.
-Restart FastAPI → áp dụng ngay (system prompt cached 5 phút).
-
-### Add new vendor (Aliyun direct rẻ hơn)
-Thêm client trong `vendors/aliyun.py` → register trong `agent/model_adapter.py`.
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Director LLM call failed: ...` | `ATLASCLOUD_LLM_API_KEY` thiếu hoặc 402 | Nạp wallet hoặc set `ANTHROPIC_API_KEY` để fallback |
+| `Bible schema invalid: ...` | LLM output JSON sai schema | Inspect `[DirectorAgent] raw head` log; thường do quên cần field; retry |
+| `Bible validation warnings: duration sum 17s lệch target 15s` | Director time-budget shots lệch | Tolerable ±2s; nếu lớn hơn → re-plan |
+| Shot quên `previous_shot_id` → identity drift | LLM bỏ qua chain hint | `continuity_manager.auto_chain_shots()` auto fill, hoặc edit shot ở UI |
+| `last_frame_url` null → chain shot fallback ref | AtlasCloud model không trả last_frame | Check `model_specs.py` model có support `return_last_frame=true` không |
+| Color consistency pass fail | FFmpeg filter sai trên ungraded clip | Pass skip + log warning, MP4 vẫn xuất (chỉ thiếu grading) |
 
 ---
 
-## 🚀 DEPLOY PRODUCTION
+## 12. Migration notes (V2 → V3)
 
-### Option 1 — VPS Hetzner đơn giản
+Đã xoá:
 
-```bash
-# Server Hetzner CX22 ~$4.5/mo
-ssh root@your-vps
-git clone <repo>
-cd ugc_vietnam_backend
-docker-compose up -d
-```
+- `backend/templates/` (30 skeleton JSON)
+- `backend/agent/personas/` (7 personas linear: director, copywriter, critic, …)
+- `backend/agent/director_brain.py` (orchestrator linear)
+- `backend/agent/proposal_builder.py`, `video_ref_analyzer.py`, `storyboard_keyframer.py`
+- `backend/prompts/analyzer_system.md` + `generator_system.md`
+- Routes `propose.py`, `storyboard.py`, `templates.py`, `enhance.py`
 
-### Option 2 — Railway/Render (cloud)
+Đã thêm:
 
-```bash
-# 1-click deploy với docker-compose.yml
-railway up
-```
+- `backend/agent/{director_agent,continuity_manager,scene_generation_agent,evaluation_layer,schemas,trend_cache}.py`
+- `backend/system_prompts/{director,scene,evaluation}.md`
+- `backend/api/routes/director.py`
+- `backend/workers/video_worker.py`
 
-### Option 3 — Self-hosted Docker
+Refactored:
 
-```bash
-docker build -t ugc-vn .
-docker run -p 8000:8000 --env-file .env ugc-vn
-```
-
----
-
-## 🎨 INTEGRATE VỚI UI ANH SẼ BUILD
-
-Khi anh build UI Electron/Next.js, chỉ cần:
-
-```typescript
-// frontend/api.ts
-const API_BASE = "http://localhost:8000";
-
-async function createJob(data) {
-  return fetch(`${API_BASE}/api/v1/jobs/ugc`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data)
-  }).then(r => r.json());
-}
-
-async function pollJob(jobId) {
-  return fetch(`${API_BASE}/api/v1/jobs/${jobId}`)
-    .then(r => r.json());
-}
-
-// Component
-async function handleCreateVideo() {
-  const job = await createJob({
-    product_input: { url: shopeeUrl },
-    avatar_id: selectedAvatar,
-    template_id: selectedTemplate,
-    settings: { ... }
-  });
-  
-  // Poll every 5s
-  const interval = setInterval(async () => {
-    const status = await pollJob(job.job_id);
-    if (status.status === "done") {
-      clearInterval(interval);
-      setVideoUrl(status.output_url);
-    }
-  }, 5000);
-}
-```
-
----
-
-## 📚 30 TEMPLATES SẴN SÀNG
-
-Em đã import 30 templates từ research (Topview + Higgsfield + community). Browse:
-
-- **Tier S** (10) — must-have: Unboxing, ASMR Skincare, Mirror Try-On, Kitchen Discovery, ...
-- **Tier A** (10) — viral hook: Pain→Solution, POV Confession, Beat-Sync 15-Shot, ...
-- **Tier B** (10) — cinematic ad: Hero Product, Luxury Perfume, Motivational, ...
-
-Đầy đủ trong `templates/`. User chọn template từ UI → backend auto-fill.
-
----
-
-## 🔐 SECURITY NOTES
-
-- API keys NEVER commit Git (đã có .gitignore)
-- Cloudflare R2 dùng presigned URL với TTL 24h
-- Rate limit per user (default 10 jobs/minute) trong `api/middleware.py`
-- HMAC signed webhook callbacks
-- Input validation Pydantic strict
-
----
-
-## 🐛 TROUBLESHOOTING
-
-### "ANTHROPIC_API_KEY not set"
-→ Check `.env` file có key chưa, restart server.
-
-### "AtlasCloud 401 Unauthorized"
-→ Verify API key tại atlascloud.ai/dashboard.
-
-### "VBee TTS sai diacritic"
-→ Test giọng khác trong `vendors/vbee.py` config (`voice_code`).
-
-### Worker treo
-→ Restart: `docker-compose restart workers`
-
----
-
-## 📞 SUPPORT
-
-Có bug/feature request → ghi vào `ISSUES.md`.
-
-Em sẽ update code khi anh cần thêm vendor (Aliyun direct, fal.ai backup, etc).
-
----
-
-**TỔNG KẾT:**
-- Backend này = **AI brain + worker chain + REST API**.
-- Anh chỉ cần build UI (Electron/Web) gọi vào REST API.
-- Train prompt = sửa file `prompts/*.md` (no fine-tune).
-- 30 templates sẵn sàng.
-- Cost ~28k VND/video.
-- Deploy 5 phút.
+- `backend/vendors/atlascloud.py` — `generate_video()` returns `last_frame_url`; new `generate_video_chain()` helper
+- `backend/api/main.py` — V3 router mounted first; legacy `/jobs/*` still served
+- `backend/api/routes/jobs.py` — banner LEGACY, only Director-approved input accepted

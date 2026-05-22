@@ -155,37 +155,7 @@ class DirectorAgent:
         shots_list = raw_dict.get("shot_list") or []
         storyboard_list = raw_dict.get("storyboard_grid") or []
 
-        # Backfill reference_assets if Director forgot to echo refs
-        if not bible_dict.get("reference_assets") and reference_images:
-            bible_dict["reference_assets"] = [
-                {
-                    "index": i,
-                    "url": url,
-                    "role": (ref_hints[i]["role"] if i < len(ref_hints) else "unknown"),
-                    "apply_to_shots": [],
-                    "notes": "",
-                }
-                for i, url in enumerate(reference_images)
-            ]
-        else:
-            # Ensure URL echoed correctly (LLM hay paraphrase)
-            for r in bible_dict["reference_assets"]:
-                idx = r.get("index")
-                if isinstance(idx, int) and 0 <= idx < len(reference_images):
-                    r["url"] = reference_images[idx]
-
-        # Fill defaults to keep Pydantic happy
-        bible_dict.setdefault("duration_s", tech_config.get("duration_s", 15))
-        bible_dict.setdefault("aspect_ratio", tech_config.get("aspect_ratio", "9:16"))
-        bible_dict.setdefault("visual_style", {})
-        bible_dict["visual_style"].setdefault("aspect_ratio", tech_config.get("aspect_ratio", "9:16"))
-        bible_dict.setdefault("audio_design", {})
-        bible_dict.setdefault("setting", {})
-        bible_dict.setdefault("constraints", {})
-        bible_dict.setdefault("director_notes", "")
-        bible_dict.setdefault("title", user_brief[:80] or "Untitled")
-        bible_dict.setdefault("logline", user_brief[:140] or "")
-        bible_dict.setdefault("intent", "viral_short")
+        bible_dict = self._repair_bible_dict(bible_dict, reference_images, ref_hints, tech_config, user_brief)
 
         try:
             bible = ContinuityBible(**bible_dict)
@@ -194,19 +164,18 @@ class DirectorAgent:
             raise RuntimeError(f"Bible schema invalid: {e}") from e
 
         parsed_shots: list[Shot] = []
-        for s_dict in shots_list:
+        for raw_idx, s_dict in enumerate(shots_list):
             try:
-                # Defensive defaults
-                s_dict.setdefault("visual", {})
-                s_dict.setdefault("audio", {})
-                s_dict.setdefault("continuity", {})
-                s_dict.setdefault("model_routing", {})
-                parsed_shots.append(Shot(**s_dict))
+                coerced = self._coerce_shot_dict(s_dict, fallback_index=raw_idx)
+                parsed_shots.append(Shot(**coerced))
             except ValidationError as ve:
-                logger.warning(f"[DirectorAgent] Shot parse fail, skip: {ve}")
+                logger.warning(f"[DirectorAgent] Shot {raw_idx} parse fail, skip: {ve}")
 
         if not parsed_shots:
             raise RuntimeError("Director Agent returned no valid shots")
+
+        # Re-index contiguously (defensive) + ensure unique shot_ids
+        parsed_shots = self._reindex_shots(parsed_shots)
 
         parsed_storyboard: list[StoryboardFrame] = []
         for f_dict in storyboard_list:
@@ -234,12 +203,13 @@ class DirectorAgent:
         )
         plan = continuity_manager.ensure_storyboard_complete(plan)
 
-        # Validate (warnings only — không block)
+        # Validate + sanitize (warnings logged once, soft issues silently fixed)
         warnings = continuity_manager.validate_plan(
             plan, target_duration_s=tech_config.get("duration_s", 15),
         )
         if warnings:
             logger.warning(f"[DirectorAgent] plan {plan_id} validation warnings: {warnings}")
+        plan = continuity_manager.sanitize_plan(plan)
 
         await _emit("director", "done",
                     shots=len(parsed_shots),
@@ -270,6 +240,170 @@ class DirectorAgent:
             f"{len(plan.shot_list)} shots, overall={plan.evaluation.overall_score}"
         )
         return plan
+
+    # ============================================================
+    # Repair helpers — coerce LLM output to schema-compatible shapes
+    # ============================================================
+    def _repair_bible_dict(
+        self,
+        bible_dict: dict,
+        reference_images: list[str],
+        ref_hints: list[dict],
+        tech_config: dict,
+        user_brief: str,
+    ) -> dict:
+        """Fill defaults + sync ref_assets URLs so Pydantic accepts the dict."""
+        # Top-level
+        bible_dict.setdefault("title", (user_brief[:80] or "Untitled").strip())
+        bible_dict.setdefault("logline", (user_brief[:140] or "Untitled video").strip())
+        bible_dict.setdefault("intent", "viral_short")
+        bible_dict.setdefault("duration_s", tech_config.get("duration_s", 15))
+        bible_dict.setdefault("aspect_ratio", tech_config.get("aspect_ratio", "9:16"))
+        bible_dict.setdefault("director_notes", "")
+        bible_dict.setdefault("characters", [])
+        bible_dict.setdefault("products", [])
+
+        # Nested objects — set defaults only if missing OR not a dict
+        vs = bible_dict.get("visual_style")
+        if not isinstance(vs, dict):
+            vs = {}
+        vs.setdefault("cinematography", "")
+        vs.setdefault("color_grading", "")
+        vs.setdefault("lighting_design", "")
+        vs.setdefault("camera_language", "")
+        vs.setdefault("film_grain", "")
+        vs.setdefault("aspect_ratio", tech_config.get("aspect_ratio", "9:16"))
+        bible_dict["visual_style"] = vs
+
+        ad = bible_dict.get("audio_design")
+        if not isinstance(ad, dict):
+            ad = {}
+        ad.setdefault("mood", "")
+        ad.setdefault("tempo", "")
+        ad.setdefault("music_genre", "")
+        ad.setdefault("sfx_emphasis", [])
+        ad.setdefault("dialogue_style", "silent")
+        bible_dict["audio_design"] = ad
+
+        st = bible_dict.get("setting")
+        if not isinstance(st, dict):
+            st = {}
+        st.setdefault("location", "")
+        st.setdefault("time_of_day", "")
+        st.setdefault("atmosphere", "")
+        bible_dict["setting"] = st
+
+        cn = bible_dict.get("constraints")
+        if not isinstance(cn, dict):
+            cn = {}
+        cn.setdefault("must_have", [])
+        cn.setdefault("must_avoid", [])
+        cn.setdefault("brand_safety", [])
+        bible_dict["constraints"] = cn
+
+        # reference_assets — backfill / sync URLs / drop invalid
+        existing = bible_dict.get("reference_assets") or []
+        if not existing and reference_images:
+            bible_dict["reference_assets"] = [
+                {
+                    "index": i,
+                    "url": url,
+                    "role": (
+                        ref_hints[i].get("role", "unknown")
+                        if i < len(ref_hints) and isinstance(ref_hints[i], dict)
+                        else "unknown"
+                    ),
+                    "apply_to_shots": [],
+                    "notes": "",
+                }
+                for i, url in enumerate(reference_images)
+            ]
+        else:
+            cleaned = []
+            for r in existing:
+                if not isinstance(r, dict):
+                    continue
+                idx = r.get("index")
+                if not isinstance(idx, int) or idx < 0 or idx >= len(reference_images):
+                    # Drop refs that don't map back to any uploaded image
+                    continue
+                # Force URL to echo the user-uploaded URL (LLM cannot invent URLs)
+                r["url"] = reference_images[idx]
+                r.setdefault("role", "unknown")
+                r.setdefault("apply_to_shots", [])
+                r.setdefault("notes", "")
+                cleaned.append(r)
+            bible_dict["reference_assets"] = cleaned
+
+        return bible_dict
+
+    def _coerce_shot_dict(self, s_dict: dict, fallback_index: int) -> dict:
+        """Clamp duration / fix index / fill nested dict defaults so Pydantic accepts."""
+        if not isinstance(s_dict, dict):
+            raise ValidationError.from_exception_data("Shot", []) if False else ValueError("shot not a dict")
+
+        # shot_id / index
+        s_dict.setdefault("shot_id", f"S{fallback_index + 1}")
+        idx = s_dict.get("index")
+        if not isinstance(idx, int) or idx < 0:
+            s_dict["index"] = fallback_index
+
+        # Duration — schema requires ge=2, le=20. Clamp LLM mistakes
+        try:
+            dur = int(s_dict.get("duration_s", 3))
+        except (TypeError, ValueError):
+            dur = 3
+        s_dict["duration_s"] = max(2, min(20, dur))
+
+        # start_s / end_s defaults — continuity_manager.normalize_timeline overrides anyway
+        s_dict.setdefault("start_s", float(fallback_index * 3))
+        s_dict.setdefault("end_s", float(fallback_index * 3 + s_dict["duration_s"]))
+
+        # Required nested objects
+        visual = s_dict.get("visual") if isinstance(s_dict.get("visual"), dict) else {}
+        visual.setdefault("subject", "")
+        visual.setdefault("action", "")
+        visual.setdefault("camera_shot", "MS")
+        visual.setdefault("camera_movement", "static")
+        visual.setdefault("composition", "")
+        visual.setdefault("background", "")
+        s_dict["visual"] = visual
+
+        audio = s_dict.get("audio") if isinstance(s_dict.get("audio"), dict) else {}
+        audio.setdefault("sfx", [])
+        s_dict["audio"] = audio
+
+        cont = s_dict.get("continuity") if isinstance(s_dict.get("continuity"), dict) else {}
+        cont.setdefault("character_ids", [])
+        cont.setdefault("product_ids", [])
+        cont.setdefault("reference_indices", [])
+        cont.setdefault("previous_shot_id", None)
+        cont.setdefault("style_anchor", "")
+        s_dict["continuity"] = cont
+
+        mr = s_dict.get("model_routing") if isinstance(s_dict.get("model_routing"), dict) else {}
+        mr.setdefault("preferred_model", "auto")
+        mr.setdefault("reasoning", "")
+        s_dict["model_routing"] = mr
+
+        s_dict.setdefault("purpose", "shot")
+        s_dict.setdefault("emotion_beat", "")
+        return s_dict
+
+    def _reindex_shots(self, shots: list[Shot]) -> list[Shot]:
+        """Force contiguous `index` 0..N-1 and dedupe shot_ids if LLM duplicated."""
+        seen_ids: set[str] = set()
+        for new_idx, s in enumerate(shots):
+            s.index = new_idx
+            if s.shot_id in seen_ids:
+                base = s.shot_id
+                bump = 2
+                while f"{base}_{bump}" in seen_ids:
+                    bump += 1
+                logger.warning(f"[DirectorAgent] duplicate shot_id '{base}' → renamed '{base}_{bump}'")
+                s.shot_id = f"{base}_{bump}"
+            seen_ids.add(s.shot_id)
+        return shots
 
     # ============================================================
     # Vision pass — classify references (best-effort, fast)

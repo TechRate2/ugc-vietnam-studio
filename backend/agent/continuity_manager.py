@@ -23,9 +23,13 @@ class ContinuityError(ValueError):
 
 
 def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int = 2) -> list[str]:
-    """Trả về list warnings (empty = clean).
+    """Validate a DirectorPlan and return a list of soft warnings (empty = clean).
 
-    Raise ContinuityError nếu lỗi không sửa được (vd: shot_id ref tới char không tồn tại).
+    Raises `ContinuityError` only for hard failures that would break the render
+    (no shots, duplicate shot_ids, previous_shot_id pointing nowhere). Soft
+    issues (unknown char_id, out-of-range reference_indices, etc.) are returned
+    as warnings so the caller can still render with `auto_chain_shots()` /
+    `references_for_shot()` recovery.
     """
     warnings: list[str] = []
     bible = plan.continuity_bible
@@ -45,7 +49,8 @@ def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int =
     # 2. shot_id unique
     ids = [s.shot_id for s in shots]
     if len(ids) != len(set(ids)):
-        raise ContinuityError(f"shot_id duplicate: {ids}")
+        dupes = sorted({sid for sid in ids if ids.count(sid) > 1})
+        raise ContinuityError(f"shot_id duplicate: {dupes}")
 
     # 3. char_ids / product_ids must exist trong Bible
     char_ids_known = {c.id for c in bible.characters}
@@ -70,16 +75,17 @@ def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int =
                 )
 
     # 5. previous_shot_id → shot_id phải tồn tại + chỉ trỏ về shot trước nó
+    #    Soft: `sanitize_plan()` clears bad refs so render still proceeds.
     id_to_idx = {s.shot_id: s.index for s in shots}
     for s in shots:
         psid = s.continuity.previous_shot_id
         if psid is None:
             continue
         if psid not in id_to_idx:
-            raise ContinuityError(
-                f"{s.shot_id}.previous_shot_id='{psid}' không tồn tại trong shot_list"
+            warnings.append(
+                f"{s.shot_id}.previous_shot_id='{psid}' không tồn tại — sẽ bị clear"
             )
-        if id_to_idx[psid] >= s.index:
+        elif id_to_idx[psid] >= s.index:
             warnings.append(
                 f"{s.shot_id}.previous_shot_id='{psid}' trỏ về shot sau hoặc bằng — "
                 f"chain phải đi xuôi thời gian"
@@ -103,6 +109,31 @@ def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int =
         )
 
     return warnings
+
+
+def sanitize_plan(plan: DirectorPlan) -> DirectorPlan:
+    """Silently drop invalid `reference_indices` and clamp `apply_to_shots`.
+
+    Use this when you want to suppress soft warnings before render — call after
+    `validate_plan()` so the warnings are logged once, then sanitize in place so
+    the downstream worker never crashes on bad indices.
+    """
+    bible = plan.continuity_bible
+    valid_shot_ids = {s.shot_id for s in plan.shot_list}
+    ref_count = len(bible.reference_assets)
+
+    for s in plan.shot_list:
+        s.continuity.reference_indices = [
+            i for i in s.continuity.reference_indices
+            if isinstance(i, int) and 0 <= i < ref_count
+        ]
+        if s.continuity.previous_shot_id and s.continuity.previous_shot_id not in valid_shot_ids:
+            s.continuity.previous_shot_id = None
+
+    for r in bible.reference_assets:
+        r.apply_to_shots = [sid for sid in r.apply_to_shots if sid in valid_shot_ids]
+
+    return plan
 
 
 def normalize_timeline(shots: list[Shot]) -> list[Shot]:

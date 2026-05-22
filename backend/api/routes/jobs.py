@@ -1,11 +1,33 @@
-"""Job CRUD endpoints — tạo UGC video job."""
+"""⚠️ LEGACY render queue — `/api/v1/jobs/*`.
+
+============================================================
+    DEPRECATION NOTICE — DO NOT BUILD NEW FEATURES HERE
+============================================================
+This module is kept ONLY for backwards-compatibility with external clients still
+posting to /api/v1/jobs/ugc. The canonical render path is now:
+
+    POST /api/v1/director/generate   (see api/routes/director.py)
+
+Differences:
+    • V3 (/director/generate)  — accepts a full DirectorPlan or a plan_request and
+                                  runs `workers/video_worker.render_plan()` (Reference
+                                  Chaining + color consistency).
+    • Legacy (this file)       — runs `workers/render_pipeline.py` (old multi-scene /
+                                  approved-script paths).
+
+Only **Director-approved input** is accepted here. Requests without
+`approved_shots` + `approved_character_sheet` are rejected with 410 Gone so users
+discover the new endpoint immediately. The auto-pick fallback path was removed.
+
+Removal target: the next major release after frontend Studio V4 fully migrates to
+DirectorPlanModal (already wired in StudioMain.tsx as of V3 refactor).
+"""
 
 import asyncio
 from uuid import UUID, uuid4
 from datetime import datetime
-from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Header
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from loguru import logger
 
 from api.schemas import (
@@ -14,64 +36,91 @@ from api.schemas import (
     JobStatus,
 )
 from agent.model_adapter import (
-    estimate_cost,
     estimate_total_job_cost,
     get_model_info,
     MAX_COST_PER_VIDEO_USD,
 )
 from workers import render_pipeline
-
-# BUG-H1 fix: file-based SQLite persistence thay in-memory dict
-# JOBS giờ persist qua backend restart.
 from core.jobs_store import JOBS, create as _create_job, update as _update_job_store
-
-# Sprint 0: Idempotency-Key middleware (chống double-submit)
 from core.idempotency import hash_body as _hash_body, lookup as _idem_lookup, store as _idem_store
 
 
 router = APIRouter()
 
 
-# ============================================
-# Background task — render in same event loop (Dramatiq production sẽ thay)
-# ============================================
+# ============================================================
+# Background runner — Director-approved path ONLY
+# ============================================================
+async def _run_director_approved_render(job_id: UUID, request_dump: dict) -> None:
+    """Run legacy render pipeline against a Director-approved payload.
 
-async def _run_render_background(job_id: UUID, request_dump: dict):
-    """Background runner — chạy render_pipeline async sau khi return job_id.
+    Dispatch priority:
+        1. approved_scenes[]    → render_pipeline.render_scenes (multi-scene queue)
+        2. approved_shots[]     → render_pipeline.render_approved (V3 strategy.build_prompt)
 
-    Priority dispatch (V3 era):
-        1. approved_scenes[] → render_scenes (TopView V2 Multi-Scene queue)
-        2. approved_script   → render_approved (V3 strategy.build_prompt)
-        3. ❌ Legacy auto-pick path REMOVED — phải /propose trước.
+    NOTE: any input missing both is rejected upstream (see _require_director_approved).
     """
     job_id_str = str(job_id)
     try:
         if request_dump.get("approved_scenes"):
             await render_pipeline.render_scenes(job_id_str, request_dump, JOBS)
-        elif request_dump.get("approved_script"):
+        elif request_dump.get("approved_shots") or request_dump.get("approved_script"):
             await render_pipeline.render_approved(job_id_str, request_dump, JOBS)
         else:
-            await render_pipeline.render_auto(job_id_str, request_dump, JOBS)  # raises
+            # defensive — endpoint should have rejected earlier
+            raise RuntimeError("legacy /jobs/ugc requires Director-approved payload")
     except Exception as e:
-        logger.exception(f"[BackgroundRender] Job {job_id} failed: {e}")
+        logger.exception(f"[LEGACY /jobs/ugc] Job {job_id} failed: {e}")
+        _update_job_store(job_id, status="failed", error_message=str(e)[:300])
 
 
-@router.post("/ugc", response_model=JobCreatedResponse)
+def _require_director_approved(request: CreateJobRequest) -> None:
+    """Reject any request that did not come from /api/v1/director/plan approval.
+
+    Required fields (set by frontend after user approves DirectorPlan):
+        - approved_shots          : list[dict]   (from cinematic_brief / Bible)
+        - approved_character_sheet: dict         (character anchor)
+    OR (older Multi-Scene UI variant):
+        - approved_scenes         : list[ApprovedScene]
+
+    Raise 410 Gone with migration hint when missing.
+    """
+    has_v3 = bool(request.approved_shots and request.approved_character_sheet)
+    has_multi_scene = bool(request.approved_scenes)
+    if not (has_v3 or has_multi_scene):
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "Legacy /api/v1/jobs/ugc requires a Director-approved payload "
+                "(approved_shots + approved_character_sheet, OR approved_scenes). "
+                "Please migrate to POST /api/v1/director/generate which handles "
+                "Continuity Bible + Shot List + Reference Chaining end-to-end."
+            ),
+        )
+
+
+# ============================================================
+# POST /api/v1/jobs/ugc — Director-approved render only
+# ============================================================
+@router.post("/ugc", response_model=JobCreatedResponse, deprecated=True)
 async def create_ugc_job(
     request: CreateJobRequest,
     background_tasks: BackgroundTasks,
     idempotency_key: str = Header(None, alias="Idempotency-Key"),
 ):
-    """Tạo UGC video job.
+    """⚠️ LEGACY — kept for back-compat. New code MUST call /api/v1/director/generate.
 
-    Pipeline:
-        1. Validate input
-        2. Estimate cost
-        3. Create job record
-        4. Trigger worker chain (scrape → analyze → generate → render → assemble)
-        5. Return job_id cho frontend poll
+    This endpoint only accepts a Director-approved payload. The old AI auto-pick
+    fallback has been removed.
     """
-    # Sprint 0: Idempotency check — chống double-submit (Stripe pattern)
+    logger.warning(
+        "[LEGACY /jobs/ugc] called — please migrate to /api/v1/director/generate "
+        f"(model={request.settings.model}, refs={len(request.reference_images)})"
+    )
+
+    _require_director_approved(request)
+
+    # ---- Idempotency-Key (Stripe pattern, kept for parity) ----
     if idempotency_key:
         body_hash = _hash_body(request.model_dump())
         cached = _idem_lookup(idempotency_key, body_hash)
@@ -79,40 +128,22 @@ async def create_ugc_job(
             if not cached["body_match"]:
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        f"Idempotency-Key đã dùng với body khác. "
-                        f"Đổi key hoặc đợi 24h."
-                    ),
+                    detail="Idempotency-Key đã dùng với body khác. Đổi key hoặc đợi 24h.",
                 )
             logger.info(
-                f"[/jobs/ugc] Idempotency cache HIT key={idempotency_key[:16]}... — replay response"
+                f"[LEGACY /jobs/ugc] Idempotency cache HIT key={idempotency_key[:16]}… — replay"
             )
             return cached["response_json"]
 
     job_id = uuid4()
-    has_approved_script = request.approved_script is not None
     logger.info(
-        f"Creating job {job_id}: template={request.template_id}, model={request.settings.model}, "
-        f"approved_proposal={request.proposal_id}, has_approved_script={has_approved_script}, "
-        f"idempotency_key={'set' if idempotency_key else 'none'}"
+        f"[LEGACY /jobs/ugc] Job {job_id} — DIRECTOR-APPROVED PATH "
+        f"(proposal_id={request.proposal_id}, model={request.settings.model})"
     )
-    if has_approved_script:
-        logger.info(
-            f"  → approved variant={request.approved_script.variant_id}, "
-            f"framework={request.approved_script.framework}, "
-            f"avatar={request.avatar_id}"
-        )
 
-    # 1. Validate model availability (raises nếu unknown/unavailable)
+    # ---- Model + spec validation ----
     model_info = get_model_info(request.settings.model)
 
-    # 2. Validate duration vs model max
-    if request.settings.duration_s > model_info["max_duration_s"]:
-        # Long-form sẽ chia bằng duration_extender — KHÔNG chặn ở đây
-        # nhưng note cost sẽ scale theo n_gens
-        pass
-
-    # 3. Validate refs vs model max
     if len(request.reference_images) > model_info["max_references"]:
         raise HTTPException(
             status_code=400,
@@ -122,7 +153,7 @@ async def create_ugc_job(
             ),
         )
 
-    # 3.1. V3.3 — Validate MIN refs per-spec (chặn Vidu Q3 ref-to-video không có ảnh → 400)
+    # Min refs check (e.g. Vidu Q3 ref-to-video needs >=1)
     try:
         from agent.model_specs import VIDEO_MODEL_SPECS
         _model_to_atlas = {
@@ -133,58 +164,46 @@ async def create_ugc_job(
             "seedance_2_0_fast": "seedance_2_0_fast_ref",
             "auto": "vidu_q3_ref",
         }
-        _atlas_k = _model_to_atlas.get(request.settings.model, "vidu_q3_ref")
-        _spec = VIDEO_MODEL_SPECS.get(_atlas_k, {})
-        _min_refs = _spec.get("min_references", 0)
-        if _min_refs > 0 and len(request.reference_images) < _min_refs:
-            # Suggest fallback dựa model spec
-            _fallback_hint = {
-                "vidu_q3": "Upload ít nhất 1 ảnh, HOẶC đổi sang Seedance 2.0 Fast (text-to-video, không cần ảnh)",
-                "vidu_q3_mix": "Upload ít nhất 1 ảnh product/character",
-                "wan_2_7": "Upload 1 ảnh portrait (mặt nhìn camera) — Wan 2.7 cần để tạo talking head",
-                "seedance_1_5_pro": "Upload ít nhất 1 ảnh (silent moodboard), HOẶC đổi sang Seedance 2.0 t2v",
-                "seedance_2_0": "Upload ít nhất 1 ảnh, HOẶC đổi sang Seedance 2.0 Fast text-to-video",
-                "seedance_2_0_fast": "Upload ít nhất 1 ảnh",
-            }.get(request.settings.model, f"Upload ít nhất {_min_refs} ảnh")
+        atlas_key = _model_to_atlas.get(request.settings.model, "vidu_q3_ref")
+        spec = VIDEO_MODEL_SPECS.get(atlas_key, {})
+        min_refs = spec.get("min_references", 0)
+        if min_refs > 0 and len(request.reference_images) < min_refs:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Model {request.settings.model} CẦN tối thiểu {_min_refs} ảnh reference, "
-                    f"nhận {len(request.reference_images)}. → {_fallback_hint}."
+                    f"Model {request.settings.model} cần tối thiểu {min_refs} reference, "
+                    f"nhận {len(request.reference_images)}."
                 ),
             )
     except HTTPException:
         raise
     except Exception as e:
-        logger.warning(f"[/jobs/ugc] min_refs validate failed (non-fatal): {e}")
+        logger.warning(f"[LEGACY /jobs/ugc] min_refs validate fail (non-fatal): {e}")
 
-    # 4. Validate audio mode + model compat
+    # Audio / model compat
     if request.settings.audio_mode == "dialogue_vo" and model_info.get("supports_silent_only"):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Model {request.settings.model} silent-only — không thể inject voice trực tiếp. "
-                f"Đổi sang vidu_q3 / wan_2_7, hoặc giữ silent_native + overlay TTS post-prod."
+                "Đổi sang vidu_q3 / wan_2_7, hoặc giữ silent_native + overlay TTS post-prod."
             ),
         )
 
-    # 5. Cost pre-flight — REJECT nếu vượt budget hard cap
+    # Cost cap
     cost = estimate_total_job_cost(
-        request.settings.model,
-        request.settings.duration_s,
-        request.settings.audio_mode,
+        request.settings.model, request.settings.duration_s, request.settings.audio_mode,
     )
     if cost["exceeds_budget"]:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Job ước tính ${cost['total_usd']} > giới hạn ${MAX_COST_PER_VIDEO_USD}. "
-                f"Giảm duration hoặc đổi model rẻ hơn."
+                "Giảm duration hoặc đổi model rẻ hơn."
             ),
         )
 
-    # 6. Create job record (file-based SQLite persist — BUG-H1 fix)
-    # BUG-M5: validate voice_persona trước khi vào pipeline để fail fast
+    # Voice persona validation (fail-fast)
     voice_persona = request.settings.voice_persona
     if voice_persona:
         from vendors.genmax import VIETNAMESE_VOICE_PRESETS
@@ -193,10 +212,11 @@ async def create_ugc_job(
                 status_code=400,
                 detail=(
                     f"voice_persona '{voice_persona}' không hợp lệ. "
-                    f"Preset alias: {list(VIETNAMESE_VOICE_PRESETS.keys())} hoặc UUID GenMax voice_id."
+                    f"Preset alias: {list(VIETNAMESE_VOICE_PRESETS.keys())} hoặc UUID voice_id."
                 ),
             )
 
+    # Persist + dispatch
     _create_job(job_id, {
         "request": request.model_dump(),
         "status": "pending",
@@ -208,21 +228,7 @@ async def create_ugc_job(
         "updated_at": datetime.utcnow().isoformat(),
     })
 
-    # 7. Dispatch render pipeline async (BackgroundTasks chạy sau khi response trả)
-    #    Path A (approved): có approved_script → render_pipeline.render_approved()
-    #    Path B (legacy):   no approved_script → render_pipeline.render_auto()
-    if has_approved_script:
-        logger.info(
-            f"Job {job_id} → APPROVED PATH (Phase 2 Director Agent), "
-            f"cost ~${cost['total_usd']}, variant={request.approved_script.variant_id}"
-        )
-    else:
-        logger.info(
-            f"Job {job_id} → LEGACY PATH (AI auto-pick), cost ~${cost['total_usd']}"
-        )
-
-    # Background render — dùng asyncio.create_task để không block response
-    background_tasks.add_task(_run_render_background, job_id, request.model_dump())
+    background_tasks.add_task(_run_director_approved_render, job_id, request.model_dump())
 
     response = JobCreatedResponse(
         job_id=job_id,
@@ -232,25 +238,29 @@ async def create_ugc_job(
         polling_url=f"/api/v1/jobs/{job_id}",
     )
 
-    # Sprint 0: Store response cho Idempotency key replay sau (TTL 24h)
     if idempotency_key:
-        body_hash = _hash_body(request.model_dump())
-        _idem_store(idempotency_key, body_hash, response.model_dump(), status_code=201)
+        _idem_store(
+            idempotency_key,
+            _hash_body(request.model_dump()),
+            response.model_dump(),
+            status_code=201,
+        )
 
     return response
 
 
+# ============================================================
+# Poll / download / cancel — unchanged from V2 (legacy clients depend on these)
+# ============================================================
 @router.get("/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: UUID):
-    """Poll job status."""
+    """⚠️ LEGACY poll endpoint. New code: GET /api/v1/director/jobs/{id}."""
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} không tồn tại")
 
-    # V3.4 — convert file:// URL sang HTTP /download endpoint (dev mode khi R2 chưa setup)
     output_url = job.get("output_url")
     if output_url and output_url.startswith("file://"):
-        # Replace local file path with HTTP endpoint browser có thể access
         output_url = f"/api/v1/jobs/{job_id}/download"
 
     return JobStatus(
@@ -271,11 +281,7 @@ async def get_job_status(job_id: UUID):
 
 @router.get("/{job_id}/download")
 async def download_job_output(job_id: UUID):
-    """Serve final MP4 từ local temp dir (dev mode khi R2 chưa setup).
-
-    V3.4 — Fallback để browser có thể preview/download khi file:// URL bị block.
-    Production cần setup R2 + return public URL trực tiếp.
-    """
+    """⚠️ LEGACY — serve final MP4 from local temp (dev mode before R2 setup)."""
     from fastapi.responses import FileResponse
     from pathlib import Path as _P
 
@@ -287,15 +293,14 @@ async def download_job_output(job_id: UUID):
     if not raw_url.startswith("file://"):
         raise HTTPException(
             status_code=400,
-            detail="Output đã upload R2 — dùng output_url trực tiếp, không cần download endpoint."
+            detail="Output đã upload R2 — dùng output_url trực tiếp, không cần download endpoint.",
         )
 
-    # Parse file:// URL → local path
-    local_path = raw_url[len("file://"):].lstrip("/").replace("/", "\\") if "\\" in raw_url else raw_url[len("file://"):]
+    local_path = raw_url[len("file://"):]
+    if "\\" in raw_url and not local_path.startswith("/"):
+        local_path = local_path.lstrip("/").replace("/", "\\")
     p = _P(local_path)
-    # Try fallback path formats
     if not p.exists():
-        # On Windows, file://C:\path may need C:\path direct
         alt = _P(raw_url.replace("file://", ""))
         if alt.exists():
             p = alt
@@ -312,18 +317,14 @@ async def download_job_output(job_id: UUID):
 
 @router.delete("/{job_id}")
 async def cancel_job(job_id: UUID):
-    """Cancel job đang chạy.
-
-    BUG-H3 fix: propagate cancel sang AtlasCloud video gen để KHÔNG bị charge tiếp.
-    """
+    """⚠️ LEGACY cancel. New code: POST /api/v1/director/jobs/{id}/cancel."""
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} không tồn tại")
 
-    if job["status"] in ["done", "failed"]:
-        raise HTTPException(status_code=400, detail=f"Job đã ở status terminal: {job['status']}")
+    if job["status"] in ("done", "failed"):
+        raise HTTPException(status_code=400, detail=f"Job đã terminal: {job['status']}")
 
-    # BUG-H3: cancel AtlasCloud prediction nếu đang running
     atlas_prediction_id = job.get("atlas_prediction_id")
     if atlas_prediction_id:
         try:
@@ -331,24 +332,22 @@ async def cancel_job(job_id: UUID):
             if atlas_client:
                 await asyncio.to_thread(atlas_client.cancel_prediction, atlas_prediction_id)
                 logger.info(
-                    f"[/jobs/cancel] AtlasCloud prediction {atlas_prediction_id} cancelled"
+                    f"[LEGACY /jobs/cancel] AtlasCloud prediction {atlas_prediction_id} cancelled"
                 )
         except Exception as e:
             logger.warning(
-                f"[/jobs/cancel] AtlasCloud cancel fail: {e} — user vẫn có thể bị charge"
+                f"[LEGACY /jobs/cancel] AtlasCloud cancel fail: {e} — user có thể vẫn bị charge"
             )
 
-    _update_job_store(
-        job_id,
-        status="failed",
-        error_message="Cancelled by user",
-    )
-
+    _update_job_store(job_id, status="failed", error_message="Cancelled by user")
     return {"status": "cancelled", "job_id": str(job_id)}
 
 
+# ============================================================
+# Helpers
+# ============================================================
 def _looks_like_voice_id(s: str) -> bool:
-    """Heuristic — UUID format hoặc 20+ char alphanumeric."""
+    """UUID-ish or 16+ char alphanumeric ID."""
     if not s:
         return False
     return len(s) >= 16 and all(c.isalnum() or c == "-" for c in s)

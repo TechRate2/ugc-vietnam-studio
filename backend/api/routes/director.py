@@ -74,7 +74,22 @@ class StoryboardRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    plan: DirectorPlan
+    """Dual-mode request — pass exactly ONE of `plan` or `plan_request`.
+
+    MODE A (Human-in-the-Loop, recommended):
+        plan = the full DirectorPlan the user reviewed & approved (possibly edited).
+
+    MODE B (Auto plan-then-render, skip review):
+        plan_request = the same payload shape as POST /api/v1/director/plan.
+        The server will call `director.plan()` first, then immediately render.
+
+    Mutual exclusion is enforced — passing both → 400.
+    """
+    plan: Optional[DirectorPlan] = None
+    plan_request: Optional[PlanRequest] = Field(
+        None,
+        description="If set (and plan=null), server calls director.plan() then renders.",
+    )
     reference_images: list[str] = Field(default_factory=list, max_length=12)
     settings: VideoSettings
     audio_plan: Optional[dict] = Field(
@@ -266,21 +281,90 @@ async def gen_storyboard(request: StoryboardRequest):
 # ============================================================
 @router.post("/generate")
 async def generate_video(request: GenerateRequest):
-    """Layer 3 — render approved DirectorPlan to MP4."""
+    """Layer 3 — render an approved DirectorPlan (Mode A) OR plan-then-render (Mode B).
+
+    Validates inputs, runs Continuity Manager checks against the plan to fail fast
+    on tampered data, then dispatches `video_worker.render_plan()` in the background.
+    """
+    # ---- Mutual-exclusion + presence check ----
+    if request.plan is None and request.plan_request is None:
+        raise HTTPException(
+            400,
+            "Provide either `plan` (approved DirectorPlan) or `plan_request` (build then render).",
+        )
+    if request.plan is not None and request.plan_request is not None:
+        raise HTTPException(
+            400,
+            "Pass exactly ONE of `plan` or `plan_request`, not both.",
+        )
+
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     _JOBS_STORE[job_id] = {
         "status": "pending",
         "progress": 0,
         "current_step": "queued",
-        "plan_id": request.plan.plan_id,
+        "plan_id": request.plan.plan_id if request.plan else None,
+        "mode": "approved" if request.plan else "auto_plan",
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
 
+    # ---- MODE B preflight (synchronous plan() call) ----
+    # We run Mode B's plan() inside the background task to keep response snappy,
+    # but Mode A can validate the supplied plan upfront for instant 4xx feedback.
+    if request.plan is not None:
+        try:
+            warnings = continuity_manager.validate_plan(
+                request.plan,
+                target_duration_s=request.settings.duration_s,
+                tolerance_s=2,
+            )
+            if warnings:
+                logger.warning(
+                    f"[/director/generate] {job_id} plan validation warnings: {warnings[:5]}"
+                )
+                _JOBS_STORE[job_id]["validation_warnings"] = warnings
+        except continuity_manager.ContinuityError as e:
+            del _JOBS_STORE[job_id]
+            raise HTTPException(400, f"Plan rejected by Continuity Manager: {e}") from e
+
     async def _run():
         try:
+            plan_to_render = request.plan
+            # MODE B — build the plan first, then render
+            if plan_to_render is None:
+                assert request.plan_request is not None
+                _JOBS_STORE[job_id].update(status="planning", current_step="director_agent")
+                tech_config = {
+                    "duration_s": request.plan_request.settings.duration_s,
+                    "aspect_ratio": request.plan_request.settings.aspect_ratio,
+                    "audio_mode": request.plan_request.settings.audio_mode,
+                    "model": request.plan_request.settings.model,
+                    "resolution": request.plan_request.settings.resolution,
+                    "num_shots": request.plan_request.settings.num_shots,
+                }
+                plan_to_render = await director.plan(
+                    product_input=request.plan_request.product_input.model_dump(exclude_none=True),
+                    reference_images=request.plan_request.reference_images,
+                    reference_videos=request.plan_request.reference_videos,
+                    user_brief=request.plan_request.user_brief,
+                    context_injection=request.plan_request.context_injection.model_dump(exclude_none=True),
+                    tech_config=tech_config,
+                    niche_hint=request.plan_request.niche_hint,
+                )
+                _JOBS_STORE[job_id]["plan_id"] = plan_to_render.plan_id
+
+                # Re-validate the freshly built plan
+                warnings = continuity_manager.validate_plan(
+                    plan_to_render,
+                    target_duration_s=request.settings.duration_s,
+                    tolerance_s=2,
+                )
+                if warnings:
+                    _JOBS_STORE[job_id]["validation_warnings"] = warnings
+
             await video_worker.render_plan(
                 job_id=job_id,
-                plan=request.plan,
+                plan=plan_to_render,
                 reference_images=request.reference_images,
                 user_model=request.settings.model,
                 resolution=request.settings.resolution,
@@ -290,16 +374,26 @@ async def generate_video(request: GenerateRequest):
             )
         except Exception as e:
             logger.exception(f"[/director/generate] job {job_id} failed")
-            _JOBS_STORE[job_id].update(
-                status="failed", error_message=str(e)[:300],
-            )
+            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
 
     asyncio.create_task(_run())
+
+    # For Mode A, estimated_* uses the supplied plan. For Mode B we don't know
+    # shot count / cost yet — fall back to the settings.duration_s as a hint.
+    if request.plan is not None:
+        est_dur = sum(s.duration_s for s in request.plan.shot_list)
+        est_cost = request.plan.cost_estimate.total_cost_usd
+    else:
+        est_dur = request.settings.duration_s
+        est_cost = 0.0
+
     return {
         "job_id": job_id,
         "polling_url": f"/api/v1/director/jobs/{job_id}",
-        "estimated_duration_s": sum(s.duration_s for s in request.plan.shot_list),
-        "estimated_cost_usd": request.plan.cost_estimate.total_cost_usd,
+        "estimated_duration_s": est_dur,
+        "estimated_cost_usd": est_cost,
+        "plan_id": _JOBS_STORE[job_id].get("plan_id"),
+        "mode": _JOBS_STORE[job_id].get("mode"),
     }
 
 
