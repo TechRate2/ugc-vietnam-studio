@@ -83,20 +83,26 @@ app.add_middleware(
 )
 
 
-# Import routes
-from api.routes import jobs, templates, avatars, video_direct, image_direct, media_upload, audio_direct, llm_direct, propose, storyboard, enhance  # noqa: E402
+# Import routes — V3 canonical flow lives under /api/v1/director/*
+# Legacy /jobs/* render endpoints kept for the existing Studio V4 modal until FE swap completes.
+from api.routes import (  # noqa: E402
+    jobs, avatars, video_direct, image_direct, media_upload,
+    audio_direct, llm_direct, director,
+)
 
-app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
-app.include_router(propose.router, prefix="/api/v1/jobs", tags=["director-agent"])
-app.include_router(storyboard.router, prefix="/api/v1/jobs/storyboard", tags=["storyboard"])
-app.include_router(enhance.router, prefix="/api/v1/enhance", tags=["enhance-prompt"])
-app.include_router(templates.router, prefix="/api/v1/templates", tags=["templates"])
+# V3 — Director Agent (Continuity Bible + Shot List + Reference Chaining)
+app.include_router(director.router, prefix="/api/v1/director", tags=["director-v3"])
+
+# Direct vendor calls (used by manual playground + by Director storyboard/audio fill)
 app.include_router(avatars.router, prefix="/api/v1/avatars", tags=["avatars"])
 app.include_router(video_direct.router, prefix="/api/v1/video/direct", tags=["video-direct"])
 app.include_router(image_direct.router, prefix="/api/v1/image/direct", tags=["image-direct"])
 app.include_router(audio_direct.router, prefix="/api/v1/audio/direct", tags=["audio-direct"])
 app.include_router(media_upload.router, prefix="/api/v1", tags=["media-upload"])
 app.include_router(llm_direct.router, prefix="/api/v1/llm", tags=["llm"])
+
+# Legacy render queue (kept for Studio V4 SceneEditor — will be removed once FE moves to /director/generate)
+app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs-legacy"])
 
 
 @app.get("/")

@@ -6,15 +6,16 @@ import { JobResultModal } from './JobResultModal';
 import { VideoAgentCard } from './VideoAgentCard';
 import { ContextInjection } from './ContextInjection';
 import { AdvancedPanel } from './AdvancedPanel';
-import { SceneEditorModal } from './SceneEditorModal';
-import { useGenerateJob } from '@/lib/studio/use-generate-job';
-import {
-  useProposeJob,
-  type ContextInjection as ContextInjectionType,
-  type NicheHint,
-} from '@/lib/studio/use-propose-job';
-import { parseRoleHints } from '@/lib/studio/parse-image-mentions';
-import type { ApprovedScene } from '@/lib/studio/use-scene-editor';
+import { DirectorPlanModal, useDirectorJobPoll } from './DirectorPlanModal';
+// V3 Director-only context-injection types (kept locally to avoid the removed use-propose-job hook)
+type ContextInjectionType = {
+  pain_points?: string;
+  real_reviews?: string;
+  usps?: string;
+  forbidden_to_say?: string;
+  mood_hint?: string;
+};
+type NicheHint = string;
 import { getModelConfig } from '@/lib/studio/model-config';
 import type { VideoModel, AspectRatio, AudioMode } from '@/lib/types/backend';
 import PRESETS from '@/lib/studio-presets.json';
@@ -59,23 +60,18 @@ export function StudioMain() {
   // V3.1 — num_shots override (null = Director tự quyết, 1-5 = user ép)
   const [numShots, setNumShots] = useState<number | null>(null);
 
-  // Director Agent (Phase 2 — Propose)
+  // Director Agent V3 (Continuity Bible + Shot List + Reference Chaining)
   const [context, setContext] = useState<ContextInjectionType>({});
   const [referenceVideos, setReferenceVideos] = useState<string[]>([]);
   const [nicheHint, setNicheHint] = useState<NicheHint>('auto');
-  const {
-    propose,
-    proposal,
-    progress: proposeProgress,
-    isLoading: isProposing,
-    error: proposeError,
-    reset: resetPropose,
-  } = useProposeJob();
-  const [showSceneEditor, setShowSceneEditor] = useState(false);
+  const [planRequest, setPlanRequest] = useState<Parameters<typeof DirectorPlanModal>[0]['initialRequest']>(null);
+  const [showPlanModal, setShowPlanModal] = useState(false);
 
-  // Render Job (Phase 3 — chạy sau khi user approve proposal)
-  const { createJob, jobStatus, isGenerating, error, reset, cancelJob } = useGenerateJob();
+  // V3 render job state (server-side dispatched in /api/v1/director/generate)
+  const [directorJobId, setDirectorJobId] = useState<string | null>(null);
+  const directorJob = useDirectorJobPoll(directorJobId);
   const [showResultModal, setShowResultModal] = useState(false);
+  const isGenerating = Boolean(directorJobId) && (directorJob?.status as string) !== 'done' && (directorJob?.status as string) !== 'failed';
 
   // Computed
   const modelConfig = getModelConfig(model);
@@ -108,89 +104,47 @@ export function StudioMain() {
     }
   };
 
-  // Phase 2 — Submit → Director Agent đề xuất (KHÔNG render thẳng)
-  const handleSubmit = async () => {
+  // V3 — Submit → Director Agent V3 plan modal (Continuity Bible review)
+  const handleSubmit = () => {
     if (!canSubmit) return;
-    setShowSceneEditor(true);
-
-    // Parse [Image N] mentions trong prompt → role hints auto-detect cho VisualPlanner
-    const { role_hints } = parseRoleHints(prompt, referenceImages.length);
-
-    try {
-      await propose({
-        product_input: {
-          url: productUrl || undefined,
-          text_description: prompt || undefined,
-          image_urls: productImg ? [productImg] : [],
-        },
-        reference_images: referenceImages,
-        reference_role_hints: role_hints,
-        reference_videos: referenceVideos,
-        user_brief: prompt,
-        context_injection: context,
-        settings: {
-          audio_mode: audioMode,
-          model,
-          duration_s: durationS,
-          aspect_ratio: aspectRatio,
-          resolution,
-          num_shots: numShots ?? undefined,
-        },
-        niche_hint: nicheHint,
-      });
-    } catch {
-      // error đã được capture trong useProposeJob — modal sẽ render ErrorState
-    }
-  };
-
-  // Phase 3 — User click "Start Generation" trong SceneEditorModal → render queue
-  // Mỗi scene = 1 shot riêng, backend smart logic: merge (≤ max_dur) / extend chain (> max_dur) / concat
-  const handleStartGeneration = async (
-    scenes: ApprovedScene[],
-    approvedKeyframes?: any[],  // NEW v3: Phase 2.5 storyboard keyframes optional
-  ) => {
-    setShowSceneEditor(false);
-    setShowResultModal(true);
-
-    // Total duration từ scenes user edit (override durationS UI)
-    const totalDuration = scenes.reduce((sum, s) => sum + s.duration_s, 0);
-
-    await createJob({
+    setPlanRequest({
       product_input: {
         url: productUrl || undefined,
         text_description: prompt || undefined,
         image_urls: productImg ? [productImg] : [],
       },
       reference_images: referenceImages,
+      reference_videos: referenceVideos,
+      user_brief: prompt,
+      context_injection: context,
       settings: {
         audio_mode: audioMode,
         model,
-        duration_s: totalDuration || durationS,
+        duration_s: durationS,
         aspect_ratio: aspectRatio,
         resolution,
+        num_shots: numShots ?? undefined,
       },
-      // Phase 2 → Phase 3 wire — TopView V2 Multi-Scene pattern
-      proposal_id: proposal?.proposal_id,
-      approved_scenes: scenes,
-      reference_mapping: proposal?.reference_mapping,
-      // V3 Model-Aware — pass cinematic shots + character_sheet để backend
-      // dispatch qua strategy.build_prompt() thay vì LLM generator
-      approved_shots: proposal?.shots,
-      approved_character_sheet: proposal?.character_sheet,
-      // NEW v3 — Phase 2.5 keyframes (optional) — backend i2v render path identity 100%
-      approved_keyframes: approvedKeyframes && approvedKeyframes.length ? approvedKeyframes : undefined,
-    } as any);
+      niche_hint: nicheHint,
+    });
+    setShowPlanModal(true);
   };
 
-  const handleSceneEditorClose = () => {
-    setShowSceneEditor(false);
-    resetPropose();
+  const handlePlanModalClose = () => {
+    setShowPlanModal(false);
+    setPlanRequest(null);
+  };
+
+  const handleJobStarted = (jobId: string) => {
+    setDirectorJobId(jobId);
+    setShowResultModal(true);
   };
 
   const handleCloseModal = () => {
     setShowResultModal(false);
-    if (jobStatus?.status === 'done' || jobStatus?.status === 'failed') {
-      reset();
+    const s = (directorJob?.status as string | undefined);
+    if (s === 'done' || s === 'failed' || s === 'cancelled') {
+      setDirectorJobId(null);
     }
   };
 
@@ -353,7 +307,7 @@ export function StudioMain() {
           costVnd={costVnd}
           costCredits={costCredits}
           isGenerating={isGenerating}
-          jobProgress={jobStatus?.progress}
+          jobProgress={typeof directorJob?.progress === 'number' ? directorJob.progress : undefined}
           canSubmit={canSubmit}
           onSubmit={handleSubmit}
         />
@@ -373,28 +327,34 @@ export function StudioMain() {
         </div>
       </div>
 
-      {/* MODAL — Multi-Scene Editor (Phase 2 — NEW v3, replace ProposalModal) */}
-      {showSceneEditor && (
-        <SceneEditorModal
-          proposal={proposal}
-          referenceImages={referenceImages}
-          isLoading={isProposing}
-          progress={proposeProgress}
-          error={proposeError}
-          onClose={handleSceneEditorClose}
-          onStartGeneration={handleStartGeneration}
-          onReject={handleSceneEditorClose}
-          onRetry={handleSubmit}
-        />
-      )}
+      {/* MODAL — Director Plan V3 (Continuity Bible + Shot List review) */}
+      <DirectorPlanModal
+        open={showPlanModal}
+        initialRequest={planRequest}
+        referenceImages={referenceImages}
+        settings={{
+          audio_mode: audioMode,
+          model,
+          duration_s: durationS,
+          aspect_ratio: aspectRatio,
+          resolution,
+        }}
+        onClose={handlePlanModalClose}
+        onJobStarted={handleJobStarted}
+      />
 
-      {/* MODAL — Render Result (Phase 3) */}
+      {/* MODAL — Render Result (V3 — polls /api/v1/director/jobs/{jobId}) */}
       {showResultModal && (
         <JobResultModal
-          status={jobStatus}
-          error={error}
+          status={directorJob as any}
+          error={(directorJob?.error_message as string | undefined) ?? null}
           onClose={handleCloseModal}
-          onCancel={cancelJob}
+          onCancel={() => {
+            if (directorJobId) {
+              fetch(`/api/v1/director/jobs/${directorJobId}/cancel`, { method: 'POST' }).catch(() => {});
+            }
+            handleCloseModal();
+          }}
         />
       )}
     </main>

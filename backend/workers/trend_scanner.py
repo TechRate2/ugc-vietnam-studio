@@ -30,7 +30,7 @@ from typing import Optional
 
 from loguru import logger
 
-from agent.personas.trend_watcher import insert_scanned_trend, log_scan
+from agent.trend_cache import insert_scanned_trend, log_scan
 from vendors.llm_router import llm
 
 

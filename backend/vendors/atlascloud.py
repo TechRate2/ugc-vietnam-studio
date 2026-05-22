@@ -207,12 +207,98 @@ class AtlasCloudClient:
             prediction_id, poll_interval_s, timeout_s, poll_path=poll_path,
         )
         outputs = result.get("outputs", [])
+        # last_frame_url for Reference Chaining (Director V3 universal ref pattern).
+        # AtlasCloud variants: last_frame_url | lastFrameUrl | last_frame | extra.last_frame_url
+        last_frame = (
+            result.get("last_frame_url")
+            or result.get("lastFrameUrl")
+            or result.get("last_frame")
+            or (result.get("extra") or {}).get("last_frame_url")
+        )
         return {
             "prediction_id": prediction_id,
             "video_url": outputs[0] if outputs else result.get("output_url"),
+            "last_frame_url": last_frame,
             "duration_s": result.get("duration") or duration_s,
             "model": payload["model"],
         }
+
+    # ============================================
+    # REFERENCE CHAINING (V3 — Director Agent universal ref)
+    # ============================================
+
+    def generate_video_chain(
+        self,
+        *,
+        scenes: list[dict],
+        reference_image_pool: list[str],
+        aspect_ratio: str = "9:16",
+        resolution: str = "720p",
+        negative_prompt: Optional[str] = None,
+        poll_interval_s: int = 5,
+        timeout_s: int = 600,
+    ) -> list[dict]:
+        """High-level helper: render N shots với Reference Chaining.
+
+        Mỗi scene dict format (xuất từ Scene Generation Agent):
+            {
+                "shot_id":               "S1",
+                "model_key":             "seedance_2_0_ref",   # ref-mode for shot 0
+                "model_key_chain":       "seedance_2_0_i2v",   # i2v for chained shots
+                "prompt":                "...",
+                "negative_prompt":       "...",
+                "duration_s":            5,
+                "reference_image_urls":  [url, ...]            # primary refs (shot 0)
+                "previous_shot_id":      None | "S0",          # chain anchor
+                "movement_amplitude":    "auto",
+                "generate_audio":        False,
+            }
+
+        Returns list of {shot_id, video_url, last_frame_url, prediction_id, duration_s}.
+        Caller (worker) downloads + concats với FFmpeg.
+        """
+        results: list[dict] = []
+        last_frame_url: Optional[str] = None
+
+        for i, scene in enumerate(scenes):
+            is_chain = bool(scene.get("previous_shot_id")) and last_frame_url is not None
+            is_last = i == len(scenes) - 1
+            model_key = scene.get("model_key_chain", scene["model_key"]) if is_chain else scene["model_key"]
+
+            call_kwargs: dict = {
+                "model_key": model_key,
+                "prompt": scene["prompt"],
+                "duration_s": scene["duration_s"],
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+                "negative_prompt": scene.get("negative_prompt") or negative_prompt,
+                "return_last_frame": not is_last,
+                "poll_interval_s": poll_interval_s,
+                "timeout_s": timeout_s,
+                "generate_audio": scene.get("generate_audio"),
+                "movement_amplitude": scene.get("movement_amplitude") or "auto",
+            }
+            if is_chain:
+                call_kwargs["image"] = last_frame_url
+            else:
+                refs = scene.get("reference_image_urls") or reference_image_pool
+                if refs:
+                    if len(refs) == 1:
+                        call_kwargs["image"] = refs[0]
+                        call_kwargs["images"] = refs
+                    else:
+                        call_kwargs["images"] = refs
+
+            logger.info(
+                f"[chain] {scene['shot_id']} → {model_key} "
+                f"mode={'i2v_chain' if is_chain else ('ref' if call_kwargs.get('images') else 't2v')} "
+                f"dur={scene['duration_s']}s"
+            )
+            result = self.generate_video(**{k: v for k, v in call_kwargs.items() if v is not None})
+            last_frame_url = result.get("last_frame_url")
+            results.append({"shot_id": scene["shot_id"], **result})
+
+        return results
 
     @billable_retry()
     def _submit_video_job(self, payload: dict, submit_path: str = "/model/generateVideo") -> str:
