@@ -18,7 +18,7 @@ from loguru import logger
 
 from core.config import settings
 from vendors._retry import billable_retry
-from agent.model_specs import build_payload as build_video_payload
+from agent.model_specs import build_payload as build_video_payload, get_spec
 
 
 def _unwrap(data: dict) -> dict:
@@ -179,7 +179,26 @@ class AtlasCloudClient:
 
         Args:
             model_key: key trong VIDEO_MODEL_SPECS (vidu_q3_ref, wan_2_7_i2v, ...)
+            timeout_s: default 600 (10min). Sprint3 B8: callers MUST override
+                for slow tiers — Vidu Q3-Mix 1080p 16s ≈ 8-12min, 1440p-SR
+                ≈ 10-15min. Recommended: 900s for ≥1080p OR ≥12s, 1200s for
+                1440p-SR. Job rate-limit may push higher on busy days.
         """
+        # Sprint3 B8: warn when caller picks default timeout for a slow tier
+        try:
+            spec = get_spec(model_key)
+            d = duration_s or spec.get("duration", {}).get("default", 0)
+            res = (resolution or spec.get("resolution", {}).get("default") or "").lower()
+            slow_tier = (
+                d >= 12 or "1440" in res or "1080p-sr" in res
+            )
+            if slow_tier and timeout_s <= 600:
+                logger.warning(
+                    f"[AtlasCloud] {model_key} duration={d}s res={res} timeout={timeout_s}s "
+                    f"may be insufficient (recommend ≥900s for slow tiers)"
+                )
+        except Exception:
+            pass  # never block render on a sanity warning
         payload = build_video_payload(
             model_key=model_key,
             prompt=prompt,

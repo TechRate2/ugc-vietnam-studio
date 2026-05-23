@@ -53,8 +53,11 @@ MODEL_REGISTRY: dict[str, dict] = {
     },
     "wan_2_7": {
         "endpoint": "alibaba/wan-2.7/image-to-video",
-        "max_duration_s": 15,  # ✅ AUDIT-FIX: spec says 2-15s (em ghi sai 8s trước)
-        "max_references": 1,    # ✅ AUDIT-FIX: i2v singular image (KHÔNG 9 refs như em ghi nhầm)
+        # Sprint3 B9 fix: Wan 2.7 ONLY accepts discrete [5, 10] (per AtlasCloud
+        # 2026-05 docs verified in model_specs.py:106). build_payload snaps to
+        # nearest discrete. Listed as 10 here for max-bound validation only.
+        "max_duration_s": 10,
+        "max_references": 1,    # i2v singular image
         "supports_audio_driven": True,
         "supports_native_audio": False,  # ✅ AUDIT-H1 fix: add missing key
         "cost_per_second_usd": 0.10,

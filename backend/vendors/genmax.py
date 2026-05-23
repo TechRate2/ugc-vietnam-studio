@@ -3,7 +3,8 @@
 Doc: https://genmax.io/app/api-docs
 
 GenMax aggregate 2 underlying providers (chọn qua `model_id`):
-    1. ElevenLabs  — model_id="eleven_multilingual_v2"
+    1. ElevenLabs  — model_id="eleven_flash_v2_5" (multilingual_v2 KHÔNG support
+                     tiếng Việt — verified GET /v1/models)
     2. MiniMax     — model_id="speech-2.8-turbo", provider="minimax"
 
 Pattern:

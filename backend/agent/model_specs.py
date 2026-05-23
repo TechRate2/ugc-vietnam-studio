@@ -359,7 +359,7 @@ VIDEO_MODEL_SPECS: dict[str, dict[str, Any]] = {
         "images_field": "reference_images",
         "max_references": 9,
         "min_references": 1,
-        "required": ["model"],
+        "required": ["model", "prompt"],
         "extra_fields": {
             "negative_prompt": {"type": "string", "default": ""},  # V3.1 anti-artifact
             "generate_audio": {"type": "bool", "default": True},
@@ -614,8 +614,20 @@ def build_payload(
 
 
 def estimate_cost(model_key: str, duration_s: int) -> float:
+    """Cost = rate × actual billed duration.
+
+    Sprint3 B6: snap to discrete options (Wan 2.7 = [5,10]) BEFORE multiply so
+    the FE estimate matches the AtlasCloud billed seconds. Without this, asking
+    Wan 2.7 for 7s would show 7×rate but vendor charges for the snapped 10s.
+    """
     spec = get_spec(model_key)
-    actual_duration = max(duration_s, spec["duration"]["min"])
+    dur_spec = spec["duration"]
+    actual_duration = max(duration_s, dur_spec["min"])
+    discrete = dur_spec.get("discrete_values")
+    if discrete:
+        # Round UP to nearest discrete option (vendor billing semantic)
+        higher = [d for d in discrete if d >= actual_duration]
+        actual_duration = min(higher) if higher else max(discrete)
     return spec["cost_per_second_usd"] * actual_duration
 
 
