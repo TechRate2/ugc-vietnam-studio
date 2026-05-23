@@ -9,6 +9,7 @@ import { AdvancedPanel } from './AdvancedPanel';
 import { DirectorPlanModal, useDirectorJobPoll } from './DirectorPlanModal';
 import { ReferenceZones, type ReferenceZonesValue } from './ReferenceZones';
 import { ProjectHistoryDrawer } from './ProjectHistoryDrawer';
+import { AssetLibrary } from './AssetLibrary';
 import type { DirectorPlan } from '@/lib/studio/use-director-plan';
 // V3 Director-only context-injection types (kept locally to avoid the removed use-propose-job hook)
 type ContextInjectionType = {
@@ -98,6 +99,14 @@ export function StudioMain() {
   // Project History drawer
   const [showHistory, setShowHistory] = useState(false);
   const [forkedPlan, setForkedPlan] = useState<DirectorPlan | null>(null);
+
+  // Sprint5 UX — Asset Library modal opened from header button (standalone
+  // access in addition to ReferenceZones' inline picker). Picked assets are
+  // pushed into the corresponding ReferenceZone.
+  const [showAssetLibrary, setShowAssetLibrary] = useState(false);
+
+  // Sprint5 UX — 3-step progress indicator (Input → Plan Review → Render)
+  const flowStep: 1 | 2 | 3 = showResultModal || isGenerating ? 3 : showPlanModal ? 2 : 1;
 
   // Computed
   const modelConfig = getModelConfig(model);
@@ -231,21 +240,25 @@ export function StudioMain() {
         >
           <History className="w-3.5 h-3.5 text-fuchsia-300" /> History
         </button>
-        <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition">
+        <button
+          onClick={() => setShowAssetLibrary(true)}
+          title="Mở thư viện Character / Product / Storyboard đã lưu — tái sử dụng giữa các dự án"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition"
+        >
           <FolderArchive className="w-3.5 h-3.5 text-emerald-300" /> Assets
         </button>
         <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-fuchsia-500 border-2 border-border" />
       </div>
 
       <div className="relative px-6 lg:px-12 pt-16 pb-12 max-w-4xl mx-auto">
-        {/* HERO */}
+        {/* HERO — Sprint5 UX: rebrand to CineForge Director V3 */}
         <div className="text-center mb-8">
           <div className="text-amber-400 text-[11px] uppercase tracking-[0.3em] font-medium mb-3 flex items-center justify-center gap-2">
             <span className="relative flex w-1.5 h-1.5">
               <span className="absolute inset-0 rounded-full bg-amber-400 animate-ping opacity-75" />
               <span className="relative w-1.5 h-1.5 rounded-full bg-amber-400" />
             </span>
-            Marketing Studio
+            CineForge Director V3 · Marketing Studio
           </div>
           <h1 className="text-3xl lg:text-5xl font-bold tracking-tight leading-[1.1]">
             Biến mọi sản phẩm thành{' '}
@@ -253,6 +266,41 @@ export function StudioMain() {
               video ad
             </span>
           </h1>
+        </div>
+
+        {/* Sprint5 UX — 3-step flow indicator: Input → Plan Review → Render */}
+        <div className="flex items-center justify-center gap-1.5 mb-6 text-[11px]">
+          {([
+            { n: 1, label: 'Input', desc: 'Nhập brief + upload references' },
+            { n: 2, label: 'Plan Review', desc: 'Xem Continuity Bible + Shot List, sửa nếu cần' },
+            { n: 3, label: 'Render', desc: 'AI render từng shot + assemble MP4' },
+          ] as const).map((s, i, arr) => (
+            <div key={s.n} className="flex items-center gap-1.5" title={s.desc}>
+              <div
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border transition ${
+                  flowStep === s.n
+                    ? 'bg-brand-700/20 border-brand-500/50 text-brand-100'
+                    : flowStep > s.n
+                      ? 'bg-emerald-700/15 border-emerald-500/30 text-emerald-200/80'
+                      : 'bg-bg-card border-border text-text-subtle'
+                }`}
+              >
+                <span
+                  className={`w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center ${
+                    flowStep === s.n
+                      ? 'bg-brand-500 text-white'
+                      : flowStep > s.n
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-bg-hover text-text-subtle'
+                  }`}
+                >
+                  {flowStep > s.n ? '✓' : s.n}
+                </span>
+                <span className="font-medium">{s.label}</span>
+              </div>
+              {i < arr.length - 1 && <span className="text-text-subtle">→</span>}
+            </div>
+          ))}
         </div>
 
         {/* ADVANCED PANEL — compact 2-col grid (gọn hơn — TopView V2 style) */}
@@ -330,7 +378,7 @@ export function StudioMain() {
           <ReferenceZones value={referenceZones} onChange={setReferenceZones} />
         </AdvancedPanel>
 
-        {/* ===== MAIN COMPACT CARD (kiểu Topview Video Agent V2) ===== */}
+        {/* ===== MAIN INPUT CARD — CineForge Director V3 entry point ===== */}
         <VideoAgentCard
           prompt={prompt}
           onPromptChange={setPrompt}
@@ -434,6 +482,42 @@ export function StudioMain() {
                 .map((r) => r.url),
             });
           }
+        }}
+      />
+
+      {/* Sprint5 UX — Asset Library modal (header button entry point).
+          ReferenceZones has its own inline picker; this surface is for
+          browsing/curating across projects without opening Advanced first. */}
+      <AssetLibrary
+        open={showAssetLibrary}
+        onClose={() => setShowAssetLibrary(false)}
+        onPick={(picked) => {
+          // Push picked URLs into images zone with role preserved
+          const newImages = [...referenceZones.images];
+          const newRoles = [...referenceZones.roles];
+          for (const a of picked) {
+            if (!newImages.includes(a.image_url)) {
+              newImages.push(a.image_url);
+              // Map AssetType → ReferenceZonesValue role
+              const roleMap: Record<string, ReferenceZonesValue['roles'][number]> = {
+                character: 'primary_subject',
+                product: 'product_hero',
+                storyboard: 'style_reference',
+              };
+              newRoles.push(roleMap[a.type] ?? null);
+            }
+          }
+          const newStoryboard = [...referenceZones.storyboardImages];
+          for (const a of picked) {
+            if (a.type === 'storyboard' && !newStoryboard.includes(a.image_url)) {
+              newStoryboard.push(a.image_url);
+            }
+          }
+          setReferenceZones({
+            images: newImages,
+            roles: newRoles,
+            storyboardImages: newStoryboard,
+          });
         }}
       />
     </main>

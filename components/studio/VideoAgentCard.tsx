@@ -229,14 +229,21 @@ export function VideoAgentCard({
 
   return (
     <div className="rounded-2xl bg-bg-card border border-border hover:border-brand-700/30 transition backdrop-blur-sm overflow-hidden">
-      {/* Header */}
+      {/* Header — Sprint5 UX: rebrand to CineForge Director V3 */}
       <div className="px-4 pt-3 pb-2 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-text text-sm font-semibold">Video Agent</span>
-          <span className="px-1.5 py-0.5 rounded bg-brand-700/20 text-brand-200 text-[10px] font-bold flex items-center gap-0.5">
-            V2 <ChevronDown className="w-2.5 h-2.5" />
+          <Sparkles className="w-3.5 h-3.5 text-brand-300" />
+          <span className="text-text text-sm font-semibold">CineForge Director</span>
+          <span className="px-1.5 py-0.5 rounded bg-brand-700/20 text-brand-200 text-[10px] font-bold">
+            V3
           </span>
         </div>
+        <span
+          className="text-[10px] text-text-subtle hidden sm:inline"
+          title="Submit sẽ mở Plan Review (Continuity Bible + Shot List) trước khi render — không gen video thẳng"
+        >
+          Human-in-the-Loop · Plan → Review → Render
+        </span>
       </div>
 
       {/* V3.1 — Per-model reference hint banner */}
@@ -352,12 +359,20 @@ export function VideoAgentCard({
 
       {/* Bottom row — Dropdowns + Cost + Submit */}
       <div className="px-4 py-3 border-t border-border flex items-center gap-1.5 flex-wrap">
-        {/* Model */}
-        <MiniDropdown<VideoModel>
-          value={model}
-          options={MODEL_OPTIONS}
-          onChange={onModelChange}
-        />
+        {/* Model — Sprint5 UX: tooltip explains Auto picker rule */}
+        <div
+          title={
+            model === 'auto'
+              ? 'Auto: AI tự chọn model tối ưu dựa trên kịch bản (số shots, dialogue lip-sync, số refs, budget tier). Xem rule chi tiết trong backend agent/model_picker.py'
+              : 'Chọn model render — Auto khuyến nghị nếu không chắc'
+          }
+        >
+          <MiniDropdown<VideoModel>
+            value={model}
+            options={MODEL_OPTIONS}
+            onChange={onModelChange}
+          />
+        </div>
 
         {/* Aspect Ratio */}
         <MiniDropdown<AspectRatio>
@@ -427,6 +442,13 @@ export function VideoAgentCard({
           <button
             onClick={onSubmit}
             disabled={!canSubmit || isGenerating}
+            title={
+              isGenerating
+                ? 'Đang render...'
+                : !canSubmit
+                  ? 'Nhập brief hoặc upload sản phẩm để tiếp tục'
+                  : 'Tạo kế hoạch video — mở Plan Review (Continuity Bible + Shot List) trước khi render'
+            }
             className="w-8 h-8 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white flex items-center justify-center transition shadow-md shadow-brand-600/40 hover:scale-105 disabled:hover:scale-100"
           >
             {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
