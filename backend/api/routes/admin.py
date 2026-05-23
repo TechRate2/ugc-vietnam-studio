@@ -11,15 +11,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from loguru import logger
 
 from core import style_presets
 from core.config import settings
+from core.sanitize import sanitize_prompt_injection
 
 
 router = APIRouter()
+
+
+# ============================================================
+# V3 CRITICAL C1 — Admin auth dependency
+# ============================================================
+async def require_admin(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")) -> None:
+    """Guard MUTATING admin endpoints.
+
+    Policy:
+      - If `ADMIN_API_KEY` env is set → header `X-Admin-Key` MUST equal it (case-sensitive).
+      - If empty AND `app_env == "development"` → bypass (localhost dev convenience).
+      - Otherwise reject 403.
+    """
+    expected = settings.admin_api_key
+    if expected:
+        if not x_admin_key or x_admin_key != expected:
+            raise HTTPException(403, "Unauthorized — set X-Admin-Key header with ADMIN_API_KEY value")
+        return
+    # No key configured
+    if settings.app_env != "development":
+        raise HTTPException(
+            403,
+            "Admin endpoints are locked: set ADMIN_API_KEY env var in production.",
+        )
 
 
 # ============================================================
@@ -80,7 +105,7 @@ async def list_presets(q: Optional[str] = None, limit: int = 100):
 
 
 @router.post("/presets")
-async def create_preset(request: CreatePresetRequest):
+async def create_preset(request: CreatePresetRequest, _: None = Depends(require_admin)):
     return style_presets.create_preset(
         name=request.name,
         description=request.description,
@@ -101,7 +126,7 @@ async def get_preset(preset_id: str):
 
 
 @router.patch("/presets/{preset_id}")
-async def update_preset(preset_id: str, request: UpdatePresetRequest):
+async def update_preset(preset_id: str, request: UpdatePresetRequest, _: None = Depends(require_admin)):
     out = style_presets.update_preset(
         preset_id,
         name=request.name,
@@ -129,7 +154,7 @@ async def touch_preset(preset_id: str):
 
 
 @router.delete("/presets/{preset_id}")
-async def delete_preset(preset_id: str):
+async def delete_preset(preset_id: str, _: None = Depends(require_admin)):
     existing = style_presets.get_preset(preset_id)
     if not existing:
         raise HTTPException(404, f"preset '{preset_id}' not found")
@@ -182,11 +207,34 @@ async def get_prompt(name: str):
 
 
 @router.put("/prompts/{name}")
-async def update_prompt(name: str, request: UpdatePromptRequest):
+async def update_prompt(
+    name: str,
+    request: UpdatePromptRequest,
+    _: None = Depends(require_admin),
+):
     """Overwrite a system prompt + clear the loader's lru_cache so the next
-    LLM call picks up the new content without server restart."""
+    LLM call picks up the new content without server restart.
+
+    V3 CRITICAL C1 (auth) + HIGH-2 (jailbreak validation):
+      - Requires admin auth (Header X-Admin-Key) per `require_admin` dependency.
+      - Scans content for prompt-injection patterns before writing — if any
+        BEYOND those that legitimately appear in system prompts as examples,
+        reject with 400. We use a soft heuristic: a system prompt is supposed
+        to declare "you are X" once at the top, not many times scattered.
+    """
     if name not in ALLOWED_PROMPTS:
         raise HTTPException(404, f"prompt '{name}' not allowed")
+
+    # Heuristic injection check — system prompts naturally describe roles, so
+    # we tolerate them but cap density (>5 matches per prompt is suspicious).
+    _, flagged = sanitize_prompt_injection(request.content)
+    if len(flagged) > 5:
+        raise HTTPException(
+            400,
+            f"Prompt rejected — {len(flagged)} injection-like patterns detected "
+            f"(threshold 5). Sample: {flagged[:3]}",
+        )
+
     path = _PROMPT_DIR / f"{name}.md"
     backup_path = path.with_suffix(".md.bak")
     if path.exists():

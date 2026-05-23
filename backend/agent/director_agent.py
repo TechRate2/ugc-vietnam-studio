@@ -87,6 +87,38 @@ class DirectorAgent:
                 fed into the Director LLM. Saves ~1 LLM call.
         """
 
+        # ===== Stage 0 (V3 C2 fix): Sanitize untrusted user inputs =====
+        # User-provided `context_injection` fields (pain_points / real_reviews /
+        # usps / forbidden_to_say / mood_hint) go straight into the LLM prompt.
+        # Without sanitization they can carry prompt injection ("ignore previous
+        # instructions") or PII (VN phone / email / CCCD) that the model
+        # shouldn't see or echo back. Wire it here BEFORE the Director call.
+        # Also sanitize `user_brief` and `niche_hint` which flow into prompt.
+        from core.sanitize import (
+            sanitize_context_injection, sanitize_prompt_injection, strip_pii,
+        )
+        try:
+            ctx_clean, ctx_report = sanitize_context_injection(context_injection or {})
+            if ctx_report.get("flagged_injections"):
+                logger.warning(
+                    f"[DirectorAgent] context_injection neutralized: "
+                    f"{ctx_report['flagged_injections'][:3]}"
+                )
+            if ctx_report.get("pii_counts"):
+                logger.info(f"[DirectorAgent] context PII redacted: {ctx_report['pii_counts']}")
+            context_injection = ctx_clean
+            brief_clean, brief_flagged = sanitize_prompt_injection(user_brief or "")
+            brief_clean, _ = strip_pii(brief_clean)
+            if brief_flagged:
+                logger.warning(f"[DirectorAgent] user_brief neutralized: {brief_flagged[:3]}")
+            user_brief = brief_clean
+            if niche_hint:
+                niche_clean, _ = sanitize_prompt_injection(niche_hint)
+                niche_hint = niche_clean
+        except Exception as e:
+            # Sanitization must never block render — log and proceed with originals
+            logger.warning(f"[DirectorAgent] sanitization fail (continuing): {e}")
+
         async def _emit(stage: str, status: str, **extra) -> None:
             if progress_callback is None:
                 return

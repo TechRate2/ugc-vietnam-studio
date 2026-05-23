@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     app_port: int = 8000
     worker_concurrency: int = 4
 
+    # V3 CRITICAL C1 — Admin key guards mutating /api/v1/admin/* endpoints.
+    # Set `ADMIN_API_KEY` env in production. When empty, admin mutations are
+    # ONLY allowed when `app_env=='development'` (localhost dev convenience).
+    admin_api_key: str = ""
+
     # Paths
     base_dir: Path = Path(__file__).parent.parent
     templates_dir: Path = Path(__file__).parent.parent / "templates"
