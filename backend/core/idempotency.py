@@ -12,7 +12,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,7 +51,7 @@ def _ensure_schema():
             c.executescript(_SCHEMA)
             # Cleanup expired
             c.execute("DELETE FROM idempotency WHERE expires_at < ?",
-                      (datetime.utcnow().isoformat(),))
+                      (datetime.now(timezone.utc).isoformat(),))
             c.commit()
         finally:
             c.close()
@@ -91,7 +91,7 @@ def lookup(key: str, body_hash: str) -> Optional[dict]:
             return None
 
         # Check expired
-        if datetime.fromisoformat(row["expires_at"]) < datetime.utcnow():
+        if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
             return None
 
         return {
@@ -109,7 +109,7 @@ def store(key: str, body_hash: str, response: Any, status_code: int = 201) -> No
         return
 
     _ensure_schema()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires = now + timedelta(hours=_TTL_HOURS)
 
     with _LOCK:

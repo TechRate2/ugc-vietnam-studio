@@ -25,7 +25,7 @@ DirectorPlanModal (already wired in StudioMain.tsx as of V3 refactor).
 
 import asyncio
 from uuid import UUID, uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from loguru import logger
@@ -224,8 +224,8 @@ async def create_ugc_job(
         "current_step": None,
         "cost_estimate_usd": cost["total_usd"],
         "cost_breakdown": cost,
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     })
 
     background_tasks.add_task(_run_director_approved_render, job_id, request.model_dump())

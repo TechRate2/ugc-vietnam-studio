@@ -9,7 +9,7 @@ Schema giữ tối thiểu — JSON blob để flexible với thay đổi schema
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
@@ -67,7 +67,7 @@ _ensure_schema()
 def create(job_id: UUID, initial: dict[str, Any]) -> None:
     """Create new job row. initial must have 'request' (CreateJobRequest dump)."""
     job_id_str = str(job_id)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         c = _conn()
         try:
@@ -121,7 +121,7 @@ def get(job_id: Any) -> Optional[dict]:
 def update(job_id: Any, **fields: Any) -> None:
     """Patch job fields. Auto bump updated_at."""
     job_id_str = str(job_id)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     # Whitelist column fields (others go vào blob)
     col_fields = {
         "status", "progress", "current_step", "output_url", "thumbnail_url",

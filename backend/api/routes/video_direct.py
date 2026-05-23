@@ -6,7 +6,7 @@ Spec source of truth: agent/model_specs.py
 
 from typing import Optional
 from uuid import UUID, uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -214,7 +214,7 @@ async def generate_direct(request: DirectVideoRequest):
         "cost_estimate_usd": cost,
         "poll_path": poll_path,
         "status": "submitted",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     return {
@@ -282,6 +282,6 @@ async def poll_direct_job(job_id: str):
 
     # Update store
     job["status"] = status
-    job["last_polled_at"] = datetime.utcnow().isoformat()
+    job["last_polled_at"] = datetime.now(timezone.utc).isoformat()
 
     return out

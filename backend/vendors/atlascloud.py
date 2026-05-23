@@ -435,9 +435,9 @@ class AtlasCloudClient:
 
             if status in ("completed", "succeeded"):
                 return body
-            if status == "failed":
+            if status in ("failed", "cancelled", "canceled", "error"):
                 raise RuntimeError(
-                    f"Prediction {prediction_id} failed: {body.get('error', 'unknown')}"
+                    f"Prediction {prediction_id} {status}: {body.get('error', 'unknown')}"
                 )
             time.sleep(poll_interval_s)
 

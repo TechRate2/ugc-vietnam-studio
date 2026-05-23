@@ -21,7 +21,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,7 +79,7 @@ def create_asset(
 ) -> dict:
     if type not in ("character", "product", "storyboard"):
         raise ValueError(f"invalid asset type: {type}")
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     asset_id = f"asset_{uuid.uuid4().hex[:12]}"
     payload_str = json.dumps(payload or {}, ensure_ascii=False)
     with _LOCK:
@@ -131,7 +131,7 @@ def update_asset(
     existing = _get_by_id(asset_id)
     if not existing:
         return None
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     new_name = name if name is not None else existing["name"]
     new_url = image_url if image_url is not None else existing["image_url"]
     new_payload = json.dumps(
@@ -153,7 +153,7 @@ def update_asset(
 
 def touch_used(asset_id: str) -> None:
     """Bump `last_used_at` so the library surfaces recently used items first."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         with _conn() as c:
             c.execute("UPDATE assets SET last_used_at = ? WHERE id = ?", (now, asset_id))

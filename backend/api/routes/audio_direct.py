@@ -5,7 +5,7 @@ Mặc định ElevenLabs voice library qua GenMax aggregator.
 
 from typing import Optional
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -142,7 +142,7 @@ async def generate_tts(request: TTSRequest):
         "status": status,
         "credits_deducted": credits_deducted,
         "raw_response": final,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if status not in ("completed", "succeeded", "success") or not audio_url:

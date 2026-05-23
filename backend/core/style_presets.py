@@ -29,7 +29,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -172,7 +172,7 @@ def _init() -> None:
             # Seed built-in nếu lần đầu
             count = c.execute("SELECT COUNT(*) FROM style_presets WHERE is_builtin=1").fetchone()[0]
             if count == 0:
-                now = datetime.utcnow().isoformat()
+                now = datetime.now(timezone.utc).isoformat()
                 for p in _BUILTIN_PRESETS:
                     c.execute(
                         """
@@ -232,7 +232,7 @@ def create_preset(
     tags: str = "",
 ) -> dict:
     preset_id = f"preset_{uuid.uuid4().hex[:12]}"
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         with _conn() as c:
             c.execute(
@@ -263,7 +263,7 @@ def update_preset(preset_id: str, **fields: Any) -> Optional[dict]:
     updates: dict[str, Any] = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return existing
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     json_keys = {"visual_style", "audio_design", "setting", "constraints"}
     set_parts: list[str] = []
     params: list[Any] = []
@@ -279,7 +279,7 @@ def update_preset(preset_id: str, **fields: Any) -> Optional[dict]:
 
 
 def touch_used(preset_id: str) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         with _conn() as c:
             c.execute("UPDATE style_presets SET last_used_at=? WHERE id=?", (now, preset_id))

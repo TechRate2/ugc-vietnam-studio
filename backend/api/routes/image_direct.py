@@ -2,7 +2,7 @@
 
 from typing import Optional
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -130,7 +130,7 @@ async def generate(request: DirectImageRequest):
         "cost_estimate_usd": cost,
         "poll_path": poll_path,
         "status": "submitted",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return {
         "job_id": job_id,

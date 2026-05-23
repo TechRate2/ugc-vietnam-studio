@@ -216,14 +216,20 @@ class GenMaxClient:
             "text": text,
             "model_id": model_id or default_model[provider],
             "language_code": language_code,
-            "voice_settings": {
+        }
+        # voice_settings = ElevenLabs only (stability/similarity_boost). MiniMax
+        # has different voice-control schema; sending these would 400 or be
+        # silently ignored. `speed` is supported by ElevenLabs only too.
+        if provider == "elevenlabs":
+            body["voice_settings"] = {
                 "stability": stability,
                 "similarity_boost": similarity_boost,
                 "speed": speed,
-            },
-        }
-        if provider == "minimax":
+            }
+        elif provider == "minimax":
             body["provider"] = "minimax"
+            if speed != 1.0:
+                body["speed"] = speed  # MiniMax supports top-level speed
 
         response = self.client.post(
             f"{self.base_url}/v1/text-to-speech/{voice_id}",

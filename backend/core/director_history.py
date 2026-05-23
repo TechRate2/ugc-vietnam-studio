@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -90,7 +90,7 @@ def record_job(
     created_at: Optional[str] = None,
 ) -> None:
     """Upsert a job snapshot. Idempotent — safe to call repeatedly."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     plan_blob = json.dumps(plan, ensure_ascii=False, default=str) if plan else None
     chain_blob = json.dumps(chain, ensure_ascii=False, default=str) if chain else None
     with _LOCK:

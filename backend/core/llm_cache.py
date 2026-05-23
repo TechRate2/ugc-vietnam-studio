@@ -26,7 +26,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -106,7 +106,7 @@ def lookup(model: str, messages: list, max_tokens: int, temperature: float) -> O
     if not conn:
         return None
     key = _make_key(model, messages, max_tokens, temperature)
-    cutoff = (datetime.utcnow() - timedelta(days=_TTL_DAYS)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_TTL_DAYS)).isoformat()
     try:
         with _lock:
             row = conn.execute(
@@ -158,7 +158,7 @@ def store(
                 "INSERT OR REPLACE INTO llm_cache "
                 "(cache_key, model, response_text, prompt_tokens, completion_tokens, cached_at, hit_count) "
                 "VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (key, model, response_text, prompt_tokens, completion_tokens, datetime.utcnow().isoformat()),
+                (key, model, response_text, prompt_tokens, completion_tokens, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
     except Exception as e:
@@ -170,7 +170,7 @@ def cleanup_expired() -> int:
     conn = _get_conn()
     if not conn:
         return 0
-    cutoff = (datetime.utcnow() - timedelta(days=_TTL_DAYS)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_TTL_DAYS)).isoformat()
     try:
         with _lock:
             cur = conn.execute("DELETE FROM llm_cache WHERE cached_at < ?", (cutoff,))

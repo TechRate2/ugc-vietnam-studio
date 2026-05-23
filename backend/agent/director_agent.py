@@ -18,7 +18,7 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable
 
 from loguru import logger
@@ -284,7 +284,7 @@ class DirectorAgent:
 
         plan = DirectorPlan(
             plan_id=plan_id,
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(timezone.utc).isoformat() + "Z",
             continuity_bible=bible,
             shot_list=parsed_shots,
             storyboard_grid=parsed_storyboard,
