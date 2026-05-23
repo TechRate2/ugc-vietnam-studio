@@ -87,6 +87,32 @@ def evaluate_draft_clip(
             suggestions=[],
         )
 
+    # CRITICAL C8 — Reject drafts where shot[0] has previous_shot_id set.
+    # Cost gate renders shot[0] in isolation; if Director planned shot[0] to
+    # chain from a non-existent prior shot, the gate prompt would inject a
+    # phantom chain anchor and the LLM evaluator would score against
+    # contradictory context. Fail-fast with actionable suggestion.
+    cont = draft_shot.get("continuity") or {}
+    if cont.get("previous_shot_id") is not None:
+        logger.error(
+            f"[cost_gate] {draft_shot_id} has previous_shot_id="
+            f"{cont['previous_shot_id']!r} — shot[0] cannot chain"
+        )
+        return CostGateDecision(
+            pass_=False,
+            score=0.0,
+            threshold=threshold,
+            reasoning=(
+                f"Cost-gate aborted — shot {draft_shot_id} (the first shot to "
+                f"render) declares previous_shot_id={cont['previous_shot_id']!r}. "
+                f"The first shot must not chain (no prior frame exists)."
+            ),
+            suggestions=[
+                f"Edit shot {draft_shot_id}: clear continuity.previous_shot_id (set to null).",
+                "Director Agent V3 system_prompts/director.md §4 'Reset chain ONLY on intentional cuts' — apply here.",
+            ],
+        )
+
     draft_brief = (
         f"COST-GATE DRAFT EVALUATION: Only shot `{draft_shot_id}` has been rendered "
         f"as a Fast-tier draft (cost-gate stage). The remaining shots in the plan "

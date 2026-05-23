@@ -313,6 +313,22 @@ class AtlasCloudClient:
             f"{self.base_url}{submit_path}",
             json=payload,
         )
+        # CRITICAL C13 — Explicit 402 handling BEFORE generic raise_for_status.
+        # billable_retry already skips retry on 4xx, but without this branch the
+        # final exception is a generic HTTPStatusError(402) — worker callers
+        # sometimes retry the whole job which re-submits and risks a second
+        # charge if the balance recovers between attempts. Raise a clearer
+        # RuntimeError so the worker layer halts the job immediately.
+        if response.status_code == 402:
+            logger.error(
+                f"[AtlasCloud] 402 INSUFFICIENT BALANCE on {submit_path} — "
+                f"aborting to avoid double-charge on retry. Top-up at "
+                f"atlascloud.ai/dashboard then retry."
+            )
+            raise RuntimeError(
+                "AtlasCloud 402 insufficient balance — render aborted to prevent "
+                "duplicate charges. Top-up wallet then re-submit."
+            )
         response.raise_for_status()
         body = _unwrap(response.json())
         prediction_id = body.get("id") or body.get("prediction_id")

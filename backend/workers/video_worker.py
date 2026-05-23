@@ -240,17 +240,30 @@ async def render_plan(
         psid = shot.continuity.previous_shot_id
         if psid:
             chain_anchor_url = last_frame_urls_by_shot_id.get(psid)
+            # CRITICAL C7 — Warn when chain anchor is missing instead of silently
+            # falling back to ref_to_video (which causes identity drift mid-video).
+            if chain_anchor_url is None and psid in last_frame_urls_by_shot_id:
+                logger.warning(
+                    f"[VideoWorker V3] {job_id} shot {shot.shot_id}: chain anchor "
+                    f"'{psid}' rendered but last_frame_url=None — identity may drift"
+                )
+            elif chain_anchor_url is None and psid not in last_frame_urls_by_shot_id:
+                logger.warning(
+                    f"[VideoWorker V3] {job_id} shot {shot.shot_id}: previous_shot_id "
+                    f"'{psid}' not found in chain (typo? skip-chain to earlier shot?) "
+                    f"— falling back to ref_to_video, identity may drift"
+                )
         will_chain = chain_anchor_url is not None and i > 0
         active_model_key = i2v_key if will_chain else ref_key
 
-        # BUG #1 fix: For Wan 2.7 (driven audio) shots with dialogue, pass the
-        # pre-rendered voice URL into Layer 2 so the renderer can attach it via
-        # the `audio` field — this is what enables true lip-sync. The URL comes
-        # from `audio_plan.voice_audio_url` (set by the TTS pre-pass) or
-        # `audio_plan.driven_audio_urls[shot_id]` for per-shot voice tracks.
+        # BUG #1 fix + CRITICAL C9: For Wan 2.7 (driven audio), attach the
+        # pre-rendered audio URL whenever the audio_plan provides one — NOT
+        # gated by shot.audio.dialogue_vn. Wan can lip-sync to humming, SFX,
+        # music tracks too; silent shots with Wan that need ANY mouth motion
+        # need the audio field. Per-shot map wins over global voice_audio_url.
         driven_audio_url: Optional[str] = None
-        if audio_plan and shot.audio.dialogue_vn:
-            per_shot_map = audio_plan.get("driven_audio_urls") if isinstance(audio_plan, dict) else None
+        if audio_plan and isinstance(audio_plan, dict):
+            per_shot_map = audio_plan.get("driven_audio_urls")
             if isinstance(per_shot_map, dict):
                 driven_audio_url = per_shot_map.get(shot.shot_id)
             if not driven_audio_url:
