@@ -43,16 +43,31 @@ class AssembleWorker:
             f"target_res={target_resolution or '(1080,1920)'}"
         )
 
+        # Sprint2 M5 — validate audio_plan UPFRONT (before expensive concat).
+        # Trước đây mode="dialogue_vo" + voice_url=None silently fallback
+        # shutil.copy (silent output) — user nghĩ có voice nhưng không có.
+        mode = audio_plan.get("mode", "silent_native")
+        voice_url = audio_plan.get("voice_audio_url")
+        sfx_audio_url = audio_plan.get("sfx_audio_url")
+        sfx_sequence = audio_plan.get("sfx_sequence") or []
+        if mode == "dialogue_vo" and not voice_url:
+            raise ValueError(
+                "audio_plan.mode='dialogue_vo' requires audio_plan.voice_audio_url. "
+                "Pre-render TTS via /api/v1/audio/direct/generate hoặc đổi mode='silent_native'."
+            )
+        if mode == "asmr_macro" and not (sfx_audio_url or sfx_sequence):
+            raise ValueError(
+                "audio_plan.mode='asmr_macro' requires audio_plan.sfx_audio_url "
+                "(merged MP3) hoặc audio_plan.sfx_sequence[]. Pre-render SFX hoặc "
+                "đổi mode='silent_native'."
+            )
+
         # Step 1: Concat videos với aspect-aware scale
         concat_path = self.work_dir / "concat.mp4"
         self._concat_with_crossfade(video_paths, str(concat_path), target_resolution)
 
-        # Step 2: Add audio theo mode — defensive get
+        # Step 2: Add audio overlay
         with_audio_path = self.work_dir / "with_audio.mp4"
-        mode = audio_plan.get("mode", "silent_native")
-        voice_url = audio_plan.get("voice_audio_url")
-        sfx_audio_url = audio_plan.get("sfx_audio_url")  # BUG-C2: 1 MP3 đã ghép
-        sfx_sequence = audio_plan.get("sfx_sequence") or []  # legacy list dict
 
         if mode == "dialogue_vo" and voice_url:
             self._overlay_voiceover(

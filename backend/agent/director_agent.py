@@ -216,15 +216,38 @@ class DirectorAgent:
             raise RuntimeError(f"Bible schema invalid: {e}") from e
 
         parsed_shots: list[Shot] = []
+        skipped_shots: list[dict] = []
         for raw_idx, s_dict in enumerate(shots_list):
             try:
                 coerced = self._coerce_shot_dict(s_dict, fallback_index=raw_idx)
                 parsed_shots.append(Shot(**coerced))
             except ValidationError as ve:
-                logger.warning(f"[DirectorAgent] Shot {raw_idx} parse fail, skip: {ve}")
+                # Sprint2 M6 — log full Pydantic errors() instead of opaque str(ve)
+                # so user can debug exactly which field LLM screwed up.
+                try:
+                    field_errors = [
+                        f"{'.'.join(str(p) for p in err.get('loc', []))}: {err.get('msg', '?')}"
+                        for err in ve.errors()[:5]
+                    ]
+                except Exception:
+                    field_errors = [str(ve)[:160]]
+                logger.warning(
+                    f"[DirectorAgent] Shot {raw_idx} validation fail — SKIPPED. "
+                    f"shot_id={s_dict.get('shot_id', '?') if isinstance(s_dict, dict) else '?'}, "
+                    f"field_errors={field_errors}"
+                )
+                skipped_shots.append({
+                    "raw_idx": raw_idx,
+                    "shot_id": (s_dict.get("shot_id") if isinstance(s_dict, dict) else None),
+                    "field_errors": field_errors,
+                })
 
         if not parsed_shots:
-            raise RuntimeError("Director Agent returned no valid shots")
+            raise RuntimeError(
+                f"Director Agent returned no valid shots — all {len(shots_list)} "
+                f"shots failed validation. First errors: "
+                f"{[s.get('field_errors') for s in skipped_shots[:2]]}"
+            )
 
         # Re-index contiguously (defensive) + ensure unique shot_ids
         parsed_shots = self._reindex_shots(parsed_shots)

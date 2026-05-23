@@ -29,7 +29,43 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# Sprint2 M2 — Per-image size cap to prevent OOM via base64 upload spam.
+# 10MB raw decodes to ~13MB base64 chars; users uploading > this should
+# go through /api/v1/upload first (R2 hosted URL).
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _validate_reference_images(images: list[str]) -> list[str]:
+    """Reject reference_images that exceed the per-image size cap.
+
+    Accepts both external URLs (http/https → cheap, just length check) and
+    `data:image/...;base64,...` data-URLs (computes decoded byte size).
+    """
+    if not images:
+        return images
+    for i, img in enumerate(images):
+        if not isinstance(img, str):
+            raise ValueError(f"reference_images[{i}] not a string")
+        if len(img) > 50_000_000:
+            # 50MB string is suspicious regardless of format
+            raise ValueError(f"reference_images[{i}] too large ({len(img)} chars)")
+        if img.startswith("data:"):
+            # Strip "data:image/jpeg;base64," prefix to get base64 payload
+            comma = img.find(",")
+            if comma > 0:
+                b64 = img[comma + 1:]
+                # base64 expansion ratio = 4/3 → bytes ≈ chars * 3/4
+                approx_bytes = len(b64) * 3 // 4
+                if approx_bytes > _MAX_IMAGE_BYTES:
+                    raise ValueError(
+                        f"reference_images[{i}] decoded ~{approx_bytes // 1024}KB "
+                        f"> {_MAX_IMAGE_BYTES // 1024}KB cap. "
+                        f"Upload qua POST /api/v1/upload trước để dùng external URL."
+                    )
+    return images
 
 from agent.director_agent import director
 from agent.schemas import DirectorPlan, ContinuityBible, Shot, StoryboardFrame
@@ -56,6 +92,11 @@ class ContextInjection(BaseModel):
 class PlanRequest(BaseModel):
     product_input: ProductInput
     reference_images: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("reference_images")
+    @classmethod
+    def _check_image_sizes(cls, v: list[str]) -> list[str]:
+        return _validate_reference_images(v)
     reference_role_hints: list[Optional[str]] = Field(
         default_factory=list,
         max_length=12,
@@ -97,6 +138,12 @@ class GenerateRequest(BaseModel):
     """
     plan: DirectorPlan
     reference_images: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("reference_images")
+    @classmethod
+    def _check_image_sizes_generate(cls, v: list[str]) -> list[str]:
+        return _validate_reference_images(v)
+
     settings: VideoSettings
     audio_plan: Optional[dict] = Field(
         None,
@@ -165,6 +212,12 @@ class RefineRequest(BaseModel):
     plan: DirectorPlan
     shot_id: str
     reference_images: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("reference_images")
+    @classmethod
+    def _check_image_sizes_refine(cls, v: list[str]) -> list[str]:
+        return _validate_reference_images(v)
+
     settings: VideoSettings
     previous_last_frame_url: Optional[str] = None
     shot_overrides: Optional[dict] = Field(
@@ -424,17 +477,37 @@ async def generate_video(request: GenerateRequest):
     except continuity_manager.ContinuityError as e:
         raise HTTPException(400, f"Plan rejected by Continuity Manager: {e}") from e
 
-    # V3.1 — also validate the plan against the chosen model's hard limits
-    # (max refs, discrete durations, etc.). Treat as warnings, but surface them
-    # to the user so they can hit "Refine" before burning credits.
+    # V3.1 + Sprint2 M1 — validate plan against chosen model's HARD limits
+    # (max refs, discrete durations, etc.). These are SPEC violations that
+    # will cause AtlasCloud to 400-reject the render mid-pipeline → user
+    # wastes the LLM cost. Strict mode rejects 400 with a clear message,
+    # forcing user to Refine before burning credits.
     model_violations = continuity_manager.validate_plan_against_model(
         request.plan, user_model=request.settings.model,
     )
     if model_violations:
+        # Whitelist: minor violations (info-only) we still warn but don't reject.
+        # Hard violations (duration discrete / refs overflow) MUST reject.
+        hard_violations = [
+            v for v in model_violations
+            if "discrete" in v or "max " in v or "out of range" in v
+        ]
+        if hard_violations:
+            logger.error(
+                f"[/director/generate] {request.plan.plan_id} HARD model-fit "
+                f"violations — render rejected: {hard_violations[:3]}"
+            )
+            raise HTTPException(
+                400,
+                "Plan not executable with model "
+                f"`{request.settings.model}`: " + " · ".join(hard_violations[:3]) +
+                " — open DirectorPlanModal → adjust durations/refs or switch model.",
+            )
+        # Soft violations only — log + record on job for UI display
         warnings.extend(model_violations)
         logger.warning(
-            f"[/director/generate] {request.plan.plan_id} model-fit violations: "
-            f"{model_violations[:5]}"
+            f"[/director/generate] {request.plan.plan_id} soft model-fit "
+            f"warnings: {model_violations[:5]}"
         )
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"

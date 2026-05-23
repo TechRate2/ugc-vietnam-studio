@@ -568,6 +568,18 @@ def build_payload(
     extras = spec.get("extra_fields", {})
 
     if negative_prompt is not None and "negative_prompt" in extras:
+        # Sprint2 M3 — cap to a safe length so we don't 400 the request at
+        # vendor edge. AtlasCloud doesn't document per-model max but 1000
+        # chars is comfortably below the typical 2000-char body cap and
+        # plenty for "no watermark, no extra fingers, no deformed face, …".
+        _NEG_MAX = extras["negative_prompt"].get("max_length", 1000)
+        if len(negative_prompt) > _NEG_MAX:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                f"[model_specs] {model_key} negative_prompt {len(negative_prompt)} "
+                f"→ truncated to {_NEG_MAX} chars"
+            )
+            negative_prompt = negative_prompt[:_NEG_MAX]
         payload["negative_prompt"] = negative_prompt
     if seed is not None and "seed" in extras:
         payload["seed"] = seed

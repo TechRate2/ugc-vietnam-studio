@@ -134,26 +134,46 @@ def validate_plan_against_model(plan: DirectorPlan, user_model: str) -> list[str
 
 
 def sanitize_plan(plan: DirectorPlan) -> DirectorPlan:
-    """Silently drop invalid `reference_indices` and clamp `apply_to_shots`.
+    """Drop invalid `reference_indices` and clamp `apply_to_shots`.
 
-    Use this when you want to suppress soft warnings before render — call after
-    `validate_plan()` so the warnings are logged once, then sanitize in place so
-    the downstream worker never crashes on bad indices.
+    Sprint2 M7 — instead of silently dropping bad refs we LOG every drop so
+    the user can see in server logs exactly which shot lost which ref.
+    Returns the plan (mutated in-place for backward compat).
     """
     bible = plan.continuity_bible
     valid_shot_ids = {s.shot_id for s in plan.shot_list}
     ref_count = len(bible.reference_assets)
+    dropped_refs: list[str] = []
+    cleared_chains: list[str] = []
+    cleared_apply: list[str] = []
 
     for s in plan.shot_list:
+        before = list(s.continuity.reference_indices)
         s.continuity.reference_indices = [
-            i for i in s.continuity.reference_indices
+            i for i in before
             if isinstance(i, int) and 0 <= i < ref_count
         ]
+        bad = [i for i in before if i not in s.continuity.reference_indices]
+        if bad:
+            dropped_refs.append(f"{s.shot_id}: dropped indices {bad} (have {ref_count} refs)")
         if s.continuity.previous_shot_id and s.continuity.previous_shot_id not in valid_shot_ids:
+            cleared_chains.append(f"{s.shot_id}: previous_shot_id='{s.continuity.previous_shot_id}' → null")
             s.continuity.previous_shot_id = None
 
     for r in bible.reference_assets:
-        r.apply_to_shots = [sid for sid in r.apply_to_shots if sid in valid_shot_ids]
+        before_apply = list(r.apply_to_shots)
+        r.apply_to_shots = [sid for sid in before_apply if sid in valid_shot_ids]
+        bad_apply = [sid for sid in before_apply if sid not in r.apply_to_shots]
+        if bad_apply:
+            cleared_apply.append(f"ref[{r.index}]: dropped apply_to_shots {bad_apply}")
+
+    if dropped_refs or cleared_chains or cleared_apply:
+        for msg in dropped_refs[:5]:
+            logger.warning(f"[sanitize_plan] {msg}")
+        for msg in cleared_chains[:5]:
+            logger.warning(f"[sanitize_plan] {msg}")
+        for msg in cleared_apply[:5]:
+            logger.warning(f"[sanitize_plan] {msg}")
 
     return plan
 

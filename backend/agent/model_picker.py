@@ -122,6 +122,22 @@ def pick_model_for_plan(
             if cap.cost_per_second_usd >= 0.09:
                 score += 0.5
 
+        # Sprint2 M4 — Hard validation pass: if the picked model literally
+        # cannot execute the plan (refs overflow / non-discrete duration),
+        # crater the score so the picker won't choose it. Without this guard,
+        # the picker might select a model that scores well on aesthetic
+        # criteria but causes mid-render 400 from AtlasCloud spec violation.
+        from agent.model_capabilities import validate_shot_against_model
+        critical_violations = 0
+        for s in shots:
+            for v in validate_shot_against_model(s.model_dump(), cap):
+                # Count only hard violations (matches /director/generate logic)
+                if "discrete" in v or "max " in v or "out of range" in v:
+                    critical_violations += 1
+        if critical_violations > 0:
+            score -= 10.0 * critical_violations  # blow well below any positive
+            notes.append(f"{critical_violations} hard spec violation(s) — pick will fail")
+
         scores[m] = (round(score, 2), notes)
 
     # Pick highest score
