@@ -624,6 +624,7 @@ async def generate_video(
         except Exception as e:
             logger.exception(f"[/director/generate] job {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
+            video_worker.cleanup_failed_job(job_id)  # Sprint3 B3
 
     _spawn(_run())
 
@@ -726,6 +727,7 @@ async def plan_and_render(request: PlanAndRenderRequest):
         except Exception as e:
             logger.exception(f"[/director/plan-and-render] job {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
+            video_worker.cleanup_failed_job(job_id)  # Sprint3 B3
 
     _spawn(_run())
 
@@ -868,6 +870,7 @@ async def refine_shot(request: RefineRequest):
         except Exception as e:
             logger.exception(f"[/director/refine] {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
+            video_worker.cleanup_failed_job(job_id)  # Sprint3 B3
 
     _spawn(_run())
     return {
@@ -955,6 +958,7 @@ async def reassemble_timeline(request: ReassembleRequest):
         except Exception as e:
             logger.exception(f"[/director/reassemble] {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
+            video_worker.cleanup_failed_job(job_id)  # Sprint3 B3
 
     _spawn(_run())
     return {

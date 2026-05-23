@@ -1,5 +1,9 @@
 """Video Worker V3 — Director Plan render orchestrator.
 
+Sprint3 B3: exposes `cleanup_failed_job(job_id)` so the route layer can drop
+the per-job work_dir on render failure — original C6 design only cleaned the
+success path, leaving ~500MB/failed-job stranded in tempfile.
+
 Replaces the linear render_pipeline path for Director Agent V3.
 
 Pipeline:
@@ -431,6 +435,27 @@ async def render_plan(
         "chain": chain_meta,
         "cost_gate": cost_gate_outcome,
     }
+
+
+def cleanup_failed_job(job_id: str) -> bool:
+    """Sprint3 B3 — drop the per-job work_dir after a render failure.
+
+    Mirrors the success-path cleanup at the end of render_plan/render_single_shot
+    so failed jobs don't strand ~500MB of intermediate clips per attempt. Safe
+    to call even if the dir was never created (rmtree ignore_errors).
+    Returns True on rmtree attempt, False on unexpected error.
+    """
+    import shutil as _shutil
+    for prefix in ("cineforge_", "cineforge_refine_"):
+        work_dir = Path(tempfile.gettempdir()) / f"{prefix}{job_id}"
+        try:
+            if work_dir.exists():
+                _shutil.rmtree(work_dir, ignore_errors=True)
+                logger.info(f"[VideoWorker V3] cleanup_failed_job removed {work_dir.name}")
+        except Exception as e:
+            logger.warning(f"[VideoWorker V3] cleanup_failed_job fail {work_dir.name}: {e}")
+            return False
+    return True
 
 
 # ============================================================
