@@ -177,6 +177,18 @@ class RefineRequest(BaseModel):
 # ============================================================
 # In-memory job store for Director V3 (replace with Dramatiq queue later)
 # ============================================================
+# CRITICAL C4 — Concurrency safety notes:
+#   This dict is mutated by FastAPI request handlers AND background coroutines
+#   spawned via `_spawn()`. Because asyncio is single-threaded, single dict ops
+#   (`d[k] = v`, `d[k].update(fields)`) are atomic at the bytecode level — no
+#   race possible between coroutines. The only risk pattern would be
+#   compound read-modify-write across `await` boundaries; there is currently
+#   no such pattern in this module (verified by audit).
+#
+#   When we migrate to Dramatiq + Redis (multi-worker), this dict MUST be
+#   replaced with a shared backing store (Redis hash or Postgres jobs table).
+#   At that point add an explicit `asyncio.Lock` or use the SQLite-backed
+#   `core/jobs_store.py` pattern.
 _JOBS_STORE: dict[str, dict[str, Any]] = {}
 
 # CRITICAL C5 — Background task lifecycle management.
