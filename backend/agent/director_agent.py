@@ -138,7 +138,26 @@ class DirectorAgent:
             f"refs={len(reference_images)}, niche_hint={niche_hint}"
         )
 
+        # Sprint2 M15 — warn explicitly when no reference images uploaded.
+        # Without refs the render falls back to text-to-video (t2v), which is
+        # ~2× slower + ~1.3× more expensive than ref-to-video for the same
+        # output quality. Users often upload nothing by accident.
+        if not reference_images:
+            logger.warning(
+                f"[DirectorAgent] plan {plan_id} has NO reference_images — "
+                f"render will fall back to text-to-video (slower + costlier). "
+                f"Upload product / character refs at /studio for ~1.3× cheaper "
+                f"+ better identity consistency."
+            )
+
         await _emit("init", "running", plan_id=plan_id)
+        if not reference_images:
+            # Surface to UI so user sees the warning in DirectorPlanModal status
+            await _emit(
+                "warning", "info",
+                code="no_reference_images",
+                message="No reference images — render will use text-to-video (slower + ~1.3× costlier).",
+            )
 
         # ===== Stage A: ref role classification =====
         # Prefer user-supplied role hints (from the 3-zone uploader in Studio V4)

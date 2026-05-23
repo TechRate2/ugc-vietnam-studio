@@ -396,9 +396,33 @@ async def create_plan_stream(request: PlanRequest, raw_request: Request):
             await event_queue.put(("complete", plan.model_dump()))
         except Exception as e:
             logger.exception("[/director/plan/stream] failed")
-            await event_queue.put(("error", {"error": _redact_error(e)}))
+            # M14 fix — force-put error event even if queue full (drain oldest)
+            try:
+                await asyncio.wait_for(
+                    event_queue.put(("error", {"error": _redact_error(e)})),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[/director/plan/stream] queue stuck — could not send error event")
         finally:
-            await event_queue.put(("__end__", None))
+            # Sprint2 M14 — guarantee __end__ delivery even when queue is full.
+            # Drain enough capacity for the terminal sentinel; client must
+            # receive __end__ to close the SSE loop cleanly.
+            try:
+                await asyncio.wait_for(
+                    event_queue.put(("__end__", None)),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                # Last-resort drain: pop oldest event, then retry
+                try:
+                    event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    event_queue.put_nowait(("__end__", None))
+                except asyncio.QueueFull:
+                    logger.error("[/director/plan/stream] failed to send __end__ — client may hang")
 
     async def _gen():
         yield 'event: open\ndata: {"message":"Director V3 starting"}\n\n'
@@ -562,6 +586,8 @@ async def generate_video(
         )
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
+    # Sprint2 M16 — bucket warnings by severity for UI display
+    classified = continuity_manager.classify_warnings(warnings)
     _JOBS_STORE[job_id] = {
         "status": "pending",
         "progress": 0,
@@ -569,11 +595,14 @@ async def generate_video(
         "plan_id": request.plan.plan_id,
         "mode": "approved",
         "validation_warnings": warnings or [],
+        "validation_severity": classified,  # {errors, warnings, info}
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
     if warnings:
         logger.warning(
-            f"[/director/generate] {job_id} plan warnings (will sanitize): {warnings[:5]}"
+            f"[/director/generate] {job_id} plan warnings "
+            f"({len(classified['errors'])}E/{len(classified['warnings'])}W/{len(classified['info'])}I, "
+            f"will sanitize): {warnings[:5]}"
         )
 
     sanitized_plan = continuity_manager.sanitize_plan(request.plan)

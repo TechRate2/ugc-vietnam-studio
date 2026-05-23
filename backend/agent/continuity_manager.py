@@ -111,6 +111,42 @@ def validate_plan(plan: DirectorPlan, target_duration_s: int, tolerance_s: int =
     return warnings
 
 
+# Sprint2 M16 — Severity tiers for plan validation warnings.
+# Lets the UI bucket "must fix" vs "ok to proceed" vs "FYI" instead of dumping
+# a flat 15-line list at the user.
+_HIGH_KEYS = (
+    "duration sum",                # timeline off by > tolerance
+    "previous_shot_id",            # broken chain reference (sanitize will null)
+    "không tồn tại",               # missing IDs
+)
+_LOW_KEYS = (
+    "storyboard_grid",             # cosmetic — storyboard images optional
+    "apply_to_shots",              # bibliography binding, not render-blocking
+)
+
+
+def classify_warnings(warnings: list[str]) -> dict[str, list[str]]:
+    """Bucket validate_plan() warning strings by severity.
+
+    Returns `{"errors": [], "warnings": [], "info": []}` with mutually-exclusive
+    lists. `errors` are things the user MUST fix to render; `warnings` are
+    things sanitize_plan() will silently fix; `info` are cosmetic.
+
+    Check LOW keys first — they're more specific (e.g. "apply_to_shots") and
+    would otherwise overlap with HIGH catch-all keys like "không tồn tại".
+    """
+    out = {"errors": [], "warnings": [], "info": []}
+    for w in warnings:
+        wl = w.lower()
+        if any(k in wl for k in (kk.lower() for kk in _LOW_KEYS)):
+            out["info"].append(w)
+        elif any(k in wl for k in (kk.lower() for kk in _HIGH_KEYS)):
+            out["warnings"].append(w)  # high but sanitize-recoverable
+        else:
+            out["warnings"].append(w)
+    return out
+
+
 def validate_plan_against_model(plan: DirectorPlan, user_model: str) -> list[str]:
     """Check every shot against the chosen model's hard capability limits.
 
