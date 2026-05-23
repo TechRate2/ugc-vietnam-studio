@@ -179,6 +179,47 @@ class RefineRequest(BaseModel):
 # ============================================================
 _JOBS_STORE: dict[str, dict[str, Any]] = {}
 
+# CRITICAL C5 — Background task lifecycle management.
+# `asyncio.create_task(_run())` fire-and-forget loses references → tasks can be
+# GC-cancelled mid-render, and on server shutdown there's no way to cancel them
+# gracefully. We register every task in `_PENDING_TASKS` and provide a helper
+# that wires `add_done_callback(discard)` so the set self-cleans, plus a public
+# `shutdown_pending_tasks()` the lifespan handler in `main.py` can await.
+_PENDING_TASKS: "set[asyncio.Task]" = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Spawn a background task with proper lifecycle tracking.
+
+    Use this instead of `asyncio.create_task()` for any task that should
+    survive past the originating request (long renders, refines, reassembles).
+    """
+    task = asyncio.create_task(coro)
+    _PENDING_TASKS.add(task)
+    task.add_done_callback(_PENDING_TASKS.discard)
+    return task
+
+
+async def shutdown_pending_tasks(timeout_s: float = 30.0) -> None:
+    """Called by FastAPI lifespan shutdown — wait for in-flight tasks then cancel.
+
+    Order:
+      1. Snapshot current pending tasks
+      2. Wait up to `timeout_s` for graceful completion
+      3. Cancel any still pending + await cancellation
+    """
+    if not _PENDING_TASKS:
+        return
+    pending = list(_PENDING_TASKS)
+    logger.info(f"[director] shutdown — awaiting {len(pending)} pending task(s) up to {timeout_s}s")
+    done, still_pending = await asyncio.wait(pending, timeout=timeout_s)
+    if still_pending:
+        logger.warning(f"[director] shutdown — cancelling {len(still_pending)} task(s) past timeout")
+        for t in still_pending:
+            t.cancel()
+        await asyncio.gather(*still_pending, return_exceptions=True)
+    logger.info(f"[director] shutdown — {len(done)} task(s) finished gracefully")
+
 
 # ============================================================
 # POST /plan — sync
@@ -419,7 +460,7 @@ async def generate_video(request: GenerateRequest):
             logger.exception(f"[/director/generate] job {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
 
-    asyncio.create_task(_run())
+    _spawn(_run())
 
     return {
         "job_id": job_id,
@@ -511,7 +552,7 @@ async def plan_and_render(request: PlanAndRenderRequest):
             logger.exception(f"[/director/plan-and-render] job {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
 
-    asyncio.create_task(_run())
+    _spawn(_run())
 
     return {
         "job_id": job_id,
@@ -653,7 +694,7 @@ async def refine_shot(request: RefineRequest):
             logger.exception(f"[/director/refine] {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
 
-    asyncio.create_task(_run())
+    _spawn(_run())
     return {
         "job_id": job_id,
         "polling_url": f"/api/v1/director/jobs/{job_id}",
@@ -740,7 +781,7 @@ async def reassemble_timeline(request: ReassembleRequest):
             logger.exception(f"[/director/reassemble] {job_id} failed")
             _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
 
-    asyncio.create_task(_run())
+    _spawn(_run())
     return {
         "job_id": job_id,
         "polling_url": f"/api/v1/director/jobs/{job_id}",

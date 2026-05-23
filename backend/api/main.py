@@ -58,6 +58,13 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("🛑 Backend shutting down...")
+    # CRITICAL C5 — Drain pending Director background tasks gracefully
+    # so in-flight renders / refines / reassembles don't get killed mid-way.
+    try:
+        from api.routes.director import shutdown_pending_tasks
+        await shutdown_pending_tasks(timeout_s=30.0)
+    except Exception as e:
+        logger.warning(f"[lifespan] shutdown_pending_tasks fail (non-fatal): {e}")
 
 
 app = FastAPI(

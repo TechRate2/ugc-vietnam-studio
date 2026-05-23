@@ -192,20 +192,19 @@ class AtlasCloudLLMClient:
                 "Content-Type": "application/json",
             },
         )
-        # FIX N4: atexit close để pool không leak
+        self._closed = False
+        # FIX N4 + CRITICAL C12: atexit-only cleanup (no __del__ double-close).
         import atexit
         atexit.register(self.close)
 
     def close(self) -> None:
+        """Idempotent close — C12 fix: guard with `_closed` flag."""
+        if self._closed:
+            return
+        self._closed = True
         try:
             if self.client is not None:
                 self.client.close()
-        except Exception:
-            pass
-
-    def __del__(self):
-        try:
-            self.close()
         except Exception:
             pass
 

@@ -44,22 +44,24 @@ class AtlasCloudClient:
                 "Content-Type": "application/json",
             },
         )
+        self._closed = False
         # FIX N4: register atexit close để httpx pool không leak
         import atexit
         atexit.register(self.close)
 
     def close(self) -> None:
-        """Close httpx pool — gọi qua atexit hoặc lifespan shutdown."""
+        """Idempotent close — safe to call multiple times via atexit + GC.
+
+        CRITICAL C12 fix: trước đây `__del__` cũng gọi `close()` → race với
+        atexit khi process exit → double-close httpx pool, exception noise.
+        Giờ guard bằng `_closed` flag + xoá `__del__` (atexit là điểm dọn dẹp).
+        """
+        if self._closed:
+            return
+        self._closed = True
         try:
             if self.client is not None:
                 self.client.close()
-        except Exception:
-            pass
-
-    def __del__(self):
-        # Defensive — atexit chính là điểm dọn dẹp, nhưng __del__ backup khi GC
-        try:
-            self.close()
         except Exception:
             pass
 

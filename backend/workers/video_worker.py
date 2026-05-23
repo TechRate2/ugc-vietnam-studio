@@ -378,6 +378,18 @@ async def render_plan(
     except Exception as e:
         logger.warning(f"[VideoWorker V3] director_history.record_job fail (non-fatal): {e}")
 
+    # CRITICAL C6 — Clean up the per-job work directory after success.
+    # work_dir holds N intermediate clips + concat + graded MP4. Each render
+    # is ~500MB, so without cleanup the disk fills within hundreds of jobs.
+    # Failed jobs INTENTIONALLY skip cleanup (handled in `_run()` wrapper at
+    # the route layer — caller can inspect work_dir for debugging).
+    try:
+        import shutil as _shutil
+        _shutil.rmtree(work_dir, ignore_errors=True)
+        logger.info(f"[VideoWorker V3] {job_id} cleaned work_dir {work_dir.name}")
+    except Exception as e:
+        logger.warning(f"[VideoWorker V3] work_dir cleanup fail (non-fatal): {e}")
+
     return {
         "output_path": str(color_pass_mp4),
         "output_url": output_url,
@@ -478,6 +490,13 @@ async def render_single_shot(
         output_path=str(clip_path),
         output_url=output_url,
     )
+
+    # CRITICAL C6 — cleanup refine work_dir after R2 upload (clip persisted).
+    try:
+        import shutil as _shutil
+        _shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception as e:
+        logger.warning(f"[VideoWorker V3] refine work_dir cleanup fail (non-fatal): {e}")
 
     return {
         "shot_id": shot_id,
