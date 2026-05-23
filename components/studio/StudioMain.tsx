@@ -1,6 +1,6 @@
 'use client';
 import { useState, useMemo } from 'react';
-import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon, History, Settings } from 'lucide-react';
+import { Diamond, FolderArchive, Eye, Link2, Image as ImgIcon, History, Settings, Sparkles } from 'lucide-react';
 import { GenerateFormats, type FormatCard } from './GenerateFormats';
 import { JobResultModal } from './JobResultModal';
 import { VideoAgentCard } from './VideoAgentCard';
@@ -233,6 +233,13 @@ export function StudioMain() {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-bg-card hover:bg-bg-hover backdrop-blur border border-border text-text text-sm transition"
         >
           <Settings className="w-3.5 h-3.5 text-brand-300" /> Admin
+        </a>
+        <a
+          href="/studio-v5"
+          title="Thử giao diện V5 — LumeFlow-inspired layout (cùng pipeline V3)"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500/15 to-purple-500/15 hover:from-fuchsia-500/25 hover:to-purple-500/25 backdrop-blur border border-fuchsia-400/30 text-fuchsia-100 text-sm transition"
+        >
+          <Sparkles className="w-3.5 h-3.5" /> Thử UI V5
         </a>
         <button
           onClick={() => setShowHistory(true)}
