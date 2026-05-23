@@ -79,6 +79,34 @@ router = APIRouter()
 
 
 # ============================================================
+# Sprint2 M8 — Safe error message redaction
+# ============================================================
+import re as _re
+_PATH_RE = _re.compile(
+    r"(?:[A-Za-z]:\\|/)"           # Drive letter "C:\" or POSIX root "/"
+    r"[\w\-./\\ ]+"                # path body
+    r"(?::\d+)?",                  # optional ":line_number"
+)
+
+
+def _redact_error(e: BaseException, cap: int = 240) -> str:
+    """Redact filesystem paths + line numbers from exception messages before
+    exposing to API clients.
+
+    Logs still get full str(e) via logger.exception — only the HTTP response
+    body / error_message field gets the redacted version.
+    """
+    msg = str(e)
+    # Strip type prefix "RuntimeError: " etc. → cleaner UX
+    if ":" in msg[:60]:
+        type_name = type(e).__name__
+        if msg.startswith(f"{type_name}: "):
+            msg = msg[len(type_name) + 2:]
+    redacted = _PATH_RE.sub("<path>", msg)
+    return redacted[:cap]
+
+
+# ============================================================
 # Request schemas
 # ============================================================
 class ContextInjection(BaseModel):
@@ -317,7 +345,7 @@ async def create_plan(request: PlanRequest):
         )
     except Exception as e:
         logger.exception("[/director/plan] failed")
-        raise HTTPException(500, f"Director Agent failed: {str(e)[:240]}") from e
+        raise HTTPException(500, f"Director Agent failed: {_redact_error(e)}") from e
 
     return plan
 
@@ -368,7 +396,7 @@ async def create_plan_stream(request: PlanRequest, raw_request: Request):
             await event_queue.put(("complete", plan.model_dump()))
         except Exception as e:
             logger.exception("[/director/plan/stream] failed")
-            await event_queue.put(("error", {"error": str(e)[:300]}))
+            await event_queue.put(("error", {"error": _redact_error(e)}))
         finally:
             await event_queue.put(("__end__", None))
 
@@ -543,7 +571,7 @@ async def generate_video(request: GenerateRequest):
             )
         except Exception as e:
             logger.exception(f"[/director/generate] job {job_id} failed")
-            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+            _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
 
     _spawn(_run())
 
@@ -635,7 +663,7 @@ async def plan_and_render(request: PlanAndRenderRequest):
             )
         except Exception as e:
             logger.exception(f"[/director/plan-and-render] job {job_id} failed")
-            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+            _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
 
     _spawn(_run())
 
@@ -692,7 +720,7 @@ async def revise_plan(request: ReviseRequest):
         )
     except Exception as e:
         logger.exception("[/director/revise] LLM call failed")
-        raise HTTPException(500, f"Revise LLM call failed: {str(e)[:240]}") from e
+        raise HTTPException(500, f"Revise LLM call failed: {_redact_error(e)}") from e
 
     try:
         raw_dict = _safe_parse_json(raw)
@@ -777,7 +805,7 @@ async def refine_shot(request: RefineRequest):
             _JOBS_STORE[job_id].update(refine_result=result)
         except Exception as e:
             logger.exception(f"[/director/refine] {job_id} failed")
-            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+            _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
 
     _spawn(_run())
     return {
@@ -864,7 +892,7 @@ async def reassemble_timeline(request: ReassembleRequest):
             )
         except Exception as e:
             logger.exception(f"[/director/reassemble] {job_id} failed")
-            _JOBS_STORE[job_id].update(status="failed", error_message=str(e)[:300])
+            _JOBS_STORE[job_id].update(status="failed", error_message=_redact_error(e))
 
     _spawn(_run())
     return {

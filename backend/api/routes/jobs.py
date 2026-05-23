@@ -281,9 +281,16 @@ async def get_job_status(job_id: UUID):
 
 @router.get("/{job_id}/download")
 async def download_job_output(job_id: UUID):
-    """⚠️ LEGACY — serve final MP4 from local temp (dev mode before R2 setup)."""
+    """⚠️ LEGACY — serve final MP4 from local temp (dev mode before R2 setup).
+
+    Sprint2 M9 — path traversal guard. The `output_url` field is set by the
+    render worker and SHOULD be a tempfile path, but a malicious job record
+    (or DB tampering) could insert `file:///etc/passwd`. We canonicalize the
+    resolved path and reject anything outside the allowed tempfile prefix.
+    """
     from fastapi.responses import FileResponse
     from pathlib import Path as _P
+    import tempfile as _tempfile
 
     job = JOBS.get(job_id)
     if not job:
@@ -299,13 +306,28 @@ async def download_job_output(job_id: UUID):
     local_path = raw_url[len("file://"):]
     if "\\" in raw_url and not local_path.startswith("/"):
         local_path = local_path.lstrip("/").replace("/", "\\")
-    p = _P(local_path)
+
+    # CRITICAL — resolve to canonical absolute path then check whitelist.
+    # Allowed prefixes: system temp dir (where renders write).
+    try:
+        p = _P(local_path).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(400, f"Invalid path: {e}") from e
+
+    allowed_root = _P(_tempfile.gettempdir()).resolve()
+    try:
+        p.relative_to(allowed_root)
+    except ValueError:
+        # Path is OUTSIDE the temp dir — likely traversal attempt
+        raise HTTPException(
+            403,
+            "Refused — output path outside the allowed temp directory. "
+            "If this is a legitimate render output, ensure it was written by "
+            "the render worker (paths under system temp dir only).",
+        )
+
     if not p.exists():
-        alt = _P(raw_url.replace("file://", ""))
-        if alt.exists():
-            p = alt
-    if not p.exists():
-        raise HTTPException(status_code=404, detail=f"File không tồn tại: {p}")
+        raise HTTPException(status_code=404, detail=f"File không tồn tại: {p.name}")
 
     return FileResponse(
         path=str(p),

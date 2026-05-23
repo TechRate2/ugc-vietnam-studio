@@ -85,8 +85,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # Sprint2 M10 — explicit allowlist instead of "*" (CSRF amplification risk).
+    # Add new headers here when introducing them.
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Admin-Key",          # /admin/* auth (C1)
+        "Idempotency-Key",      # /jobs/ugc + /director/generate (M11)
+        "Accept",
+        "Accept-Language",
+        "X-Requested-With",
+    ],
 )
 
 
