@@ -253,6 +253,12 @@ export function useDirectorPlan() {
             setProgress({ stage: 'done', status: 'done' });
           } else if (evType === 'error') {
             throw new Error((payload as { error: string }).error || 'unknown');
+          } else if (evType === '__end__') {
+            // Sprint3 B4 — backend M14 force-emits __end__ as terminal sentinel.
+            // Consume it to guarantee the reader loop exits even if the network
+            // keeps the response body open after the final SSE block.
+            try { await reader.cancel(); } catch { /* noop */ }
+            return;
           }
         }
       }
@@ -286,10 +292,18 @@ export async function generateFromPlan(args: {
   settings: VideoSettings;
   audio_plan?: Record<string, unknown>;
   use_llm_scene_gen?: boolean;
+  idempotencyKey?: string;
 }): Promise<{ job_id: string; polling_url: string; estimated_duration_s: number; estimated_cost_usd: number }> {
+  // Sprint3 B5 — Idempotency-Key header so double-click / network retry doesn't
+  // spawn two render jobs (24h TTL on backend, matches Stripe convention).
+  const idemKey = args.idempotencyKey
+    ?? (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const res = await fetch('/api/v1/director/generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idemKey,
+    },
     body: JSON.stringify({
       plan: args.plan,
       reference_images: args.reference_images,

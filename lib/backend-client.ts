@@ -22,7 +22,8 @@ function _resolveBackendUrl(): string {
       + 'trong Vercel/Railway env vars.',
     );
   }
-  return 'http://localhost:8000';
+  // Sprint3 B2 — backend dev port is 8001 (matches next.config.js + run scripts)
+  return 'http://localhost:8001';
 }
 
 const BACKEND_URL = _resolveBackendUrl();

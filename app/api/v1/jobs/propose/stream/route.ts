@@ -7,7 +7,7 @@
 
 import { NextRequest } from 'next/server';
 
-const BACKEND = process.env.BACKEND_URL || 'http://localhost:8000';
+const BACKEND = process.env.BACKEND_URL || 'http://localhost:8001';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
