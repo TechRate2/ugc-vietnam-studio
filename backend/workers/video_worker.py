@@ -125,7 +125,40 @@ async def render_plan(
         from agent.model_picker import pick_model_for_plan
         picked, reasoning = pick_model_for_plan(plan, budget_tier="balanced")
         logger.info(f"[VideoWorker V3] auto-pick → {picked}: {reasoning}")
-        _update_job(jobs_store, job_id, auto_pick={"model": picked, "reasoning": reasoning})
+        # Sprint2 M12 — re-compute cost estimate against the ACTUAL picked model
+        # (plan.cost_estimate was built using the original user_model 'auto'
+        # placeholder $0.060/s heuristic — could be off-by-2x for premium models).
+        _PER_S = {
+            "vidu_q3": 0.042, "vidu_q3_mix": 0.106,
+            "wan_2_7": 0.10,
+            "seedance_1_5_pro": 0.047,
+            "seedance_2_0": 0.096, "seedance_2_0_fast": 0.076,
+        }.get(picked, 0.096)
+        total_dur = sum(s.duration_s for s in shots)
+        new_render_cost = round(_PER_S * total_dur, 3)
+        old_render_cost = plan.cost_estimate.render_cost_usd
+        plan.cost_estimate.render_cost_usd = new_render_cost
+        plan.cost_estimate.total_cost_usd = round(
+            plan.cost_estimate.plan_cost_usd
+            + plan.cost_estimate.storyboard_gen_cost_usd
+            + new_render_cost
+            + plan.cost_estimate.audio_cost_usd,
+            3,
+        )
+        if abs(new_render_cost - old_render_cost) > 0.1:
+            logger.warning(
+                f"[VideoWorker V3] auto-pick cost re-estimate: render "
+                f"${old_render_cost} → ${new_render_cost} (Δ ${new_render_cost - old_render_cost:+.2f}) "
+                f"after picking {picked}"
+            )
+        _update_job(
+            jobs_store, job_id,
+            auto_pick={
+                "model": picked,
+                "reasoning": reasoning,
+                "render_cost_usd_recomputed": new_render_cost,
+            },
+        )
         user_model = picked
 
     ref_key_default, i2v_key_default = _resolve_models(user_model)

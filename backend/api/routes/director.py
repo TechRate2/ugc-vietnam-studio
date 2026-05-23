@@ -26,7 +26,7 @@ import uuid
 from typing import Optional, Any
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
@@ -487,14 +487,37 @@ async def gen_storyboard(request: StoryboardRequest):
 # POST /generate — render an approved DirectorPlan (canonical path)
 # ============================================================
 @router.post("/generate")
-async def generate_video(request: GenerateRequest):
+async def generate_video(
+    request: GenerateRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
     """Layer 3 — render an approved DirectorPlan.
 
     Canonical Human-in-the-Loop entry: the frontend POSTs back the plan the user
     just reviewed (or edited) in `DirectorPlanModal`. The server re-validates
     continuity, sanitizes soft issues, then dispatches the render in the
     background. Returns a `job_id` for polling at `/director/jobs/{id}`.
+
+    Sprint2 M11 — Idempotency-Key support (Stripe pattern). When the client
+    sends `Idempotency-Key: <uuid>` header, the same key+body combo replays
+    the original response for 24h. Prevents double-render on browser retry.
     """
+    # Sprint2 M11 — Idempotency check (replay cached response if key+body match)
+    if idempotency_key:
+        from core.idempotency import hash_body as _hash_body, lookup as _idem_lookup
+        body_hash = _hash_body(request.model_dump())
+        cached = _idem_lookup(idempotency_key, body_hash)
+        if cached:
+            if not cached["body_match"]:
+                raise HTTPException(
+                    409,
+                    "Idempotency-Key đã dùng với body khác. Đổi key hoặc đợi 24h.",
+                )
+            logger.info(
+                f"[/director/generate] Idempotency replay key={idempotency_key[:16]}…"
+            )
+            return cached["response_json"]
+
     # Validate continuity upfront → fail-fast 400 for tampered plans
     try:
         warnings = continuity_manager.validate_plan(
@@ -575,7 +598,7 @@ async def generate_video(request: GenerateRequest):
 
     _spawn(_run())
 
-    return {
+    response = {
         "job_id": job_id,
         "polling_url": f"/api/v1/director/jobs/{job_id}",
         "estimated_duration_s": sum(s.duration_s for s in sanitized_plan.shot_list),
@@ -584,6 +607,16 @@ async def generate_video(request: GenerateRequest):
         "mode": "approved",
         "cost_gate_mode": request.cost_gate_mode,
     }
+
+    # Sprint2 M11 — store for idempotency replay (24h TTL)
+    if idempotency_key:
+        from core.idempotency import hash_body as _hash_body, store as _idem_store
+        try:
+            _idem_store(idempotency_key, _hash_body(request.model_dump()), response, status_code=201)
+        except Exception as e:
+            logger.warning(f"[/director/generate] idem store fail (non-fatal): {e}")
+
+    return response
 
 
 # ============================================================

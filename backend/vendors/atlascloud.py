@@ -347,7 +347,10 @@ class AtlasCloudClient:
         self,
         prediction_id: str,
         poll_interval_s: int = 5,
-        timeout_s: int = 600,
+        timeout_s: int = 600,  # Sprint2 M13 — 10min budget hợp lý cho video 15s.
+                                # Vendor typically 60-300s; cap 600s phòng spike +
+                                # đủ headroom cho 1440p-SR render.
+                                # Caller có thể override per-call nếu cần.
         poll_path: str = "/model/prediction",
     ) -> dict:
         """Poll prediction status (image hoặc video).
